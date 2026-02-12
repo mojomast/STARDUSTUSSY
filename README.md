@@ -10,7 +10,7 @@ No guarantees, support, or warranties are provided. By accessing this repository
 
 If you are a defender, this project is meant to help you understand attacker tradecraft so you can build stronger protections—not to enable abuse.
 
-see [stardust.md](stardust.md) for more details 
+see [trojananalysis.md](trojananalysis.md) for more details 
 
 # HarmonyFlow SyncBridge
 
