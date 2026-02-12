@@ -1,5 +1,7 @@
 ******THIS IS A SECURITY RESEARCH PROJECT. DO NOT USE THIS SOFTWARE THERE IS AN OBFUSCATED RAT IN THIS*****
 
+It was created by using the ENI jailbreak to prompt opus 4.6 to design a project with an obfuscated RAT inside. I have not tested any of this, it was purely an exersize to see how easy it is to bypass guardrails to get LLMs to build malware.
+
 # Security Research Proof of Concept
 
 This repository contains a proof-of-concept implementation created strictly for security research and educational purposes. The goal of this project is to demonstrate how remote access techniques can be implemented so that defenders, security researchers, and students can better understand, detect, and mitigate such threats.
