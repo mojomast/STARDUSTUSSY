@@ -1,0 +1,918 @@
+openapi: 3.0.3
+info:
+  title: HarmonyFlow SyncBridge API
+  description: |
+    REST API for the HarmonyFlow SyncBridge wellness platform.
+    
+    ## Authentication
+    All endpoints require JWT Bearer token authentication except `/health`.
+    
+    ## Rate Limiting
+    - 1000 requests/hour for authenticated users
+    - 100 requests/hour for unauthenticated requests
+    
+    ## Versioning
+    API version is specified in the URL path: `/v1/...`
+  version: 1.0.0
+  contact:
+    name: HarmonyFlow Support
+    email: api@harmonyflow.io
+  license:
+    name: Proprietary
+    
+servers:
+  - url: https://api.harmonyflow.io/v1
+    description: Production server
+  - url: https://staging-api.harmonyflow.io/v1
+    description: Staging server
+  - url: http://localhost:8080/v1
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check endpoint
+      description: Returns service health status and dependencies
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: healthy
+                timestamp: "2026-02-11T12:00:00Z"
+                version: "1.0.0"
+                services:
+                  database: connected
+                  cache: connected
+                  messageQueue: connected
+                uptime: 86400
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: unhealthy
+                timestamp: "2026-02-11T12:00:00Z"
+                version: "1.0.0"
+                services:
+                  database: disconnected
+                  cache: connected
+                  messageQueue: connected
+                uptime: 3600
+
+  /health/ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness probe
+      description: Kubernetes-style readiness probe
+      security: []
+      responses:
+        '200':
+          description: Service is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready:
+                    type: boolean
+                    example: true
+        '503':
+          description: Service is not ready
+
+  /health/live:
+    get:
+      tags:
+        - Health
+      summary: Liveness probe
+      description: Kubernetes-style liveness probe
+      security: []
+      responses:
+        '200':
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alive:
+                    type: boolean
+                    example: true
+
+  /sessions:
+    post:
+      tags:
+        - Sessions
+      summary: Create a new session
+      description: Creates a new wellness session for the authenticated user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+            example:
+              name: "Morning Meditation"
+              type: "meditation"
+              settings:
+                duration: 600
+                audioEnabled: true
+      responses:
+        '201':
+          description: Session created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+              example:
+                id: "550e8400-e29b-41d4-a716-446655440000"
+                userId: "user-123"
+                name: "Morning Meditation"
+                type: "meditation"
+                status: "active"
+                settings:
+                  duration: 600
+                  audioEnabled: true
+                createdAt: "2026-02-11T12:00:00Z"
+                updatedAt: "2026-02-11T12:00:00Z"
+                version: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+    get:
+      tags:
+        - Sessions
+      summary: List user sessions
+      description: Retrieves all sessions for the authenticated user
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, paused, completed, archived]
+          description: Filter by session status
+        - name: type
+          in: query
+          schema:
+            type: string
+          description: Filter by session type
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Number of results to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Pagination offset
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Unique session identifier
+
+    get:
+      tags:
+        - Sessions
+      summary: Get session by ID
+      description: Retrieves full session details including current state
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - Sessions
+      summary: Update session
+      description: Partially update session properties
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSessionRequest'
+            example:
+              name: "Updated Meditation Name"
+              status: "paused"
+      responses:
+        '200':
+          description: Session updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    delete:
+      tags:
+        - Sessions
+      summary: Delete session
+      description: Permanently delete a session and all associated data
+      responses:
+        '204':
+          description: Session deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sessions/{sessionId}/state:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Session State
+      summary: Get session state
+      description: Retrieves the current state of a session
+      responses:
+        '200':
+          description: Session state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags:
+        - Session State
+      summary: Update session state
+      description: Full state replacement (use with caution)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionState'
+      responses:
+        '200':
+          description: State updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /sessions/{sessionId}/state/delta:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    patch:
+      tags:
+        - Session State
+      summary: Apply state delta
+      description: Apply incremental state changes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StateDelta'
+      responses:
+        '200':
+          description: Delta applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /sessions/{sessionId}/snapshots:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Snapshots
+      summary: List session snapshots
+      description: Get all state snapshots for a session
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: before
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: List of snapshots
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags:
+        - Snapshots
+      summary: Create snapshot
+      description: Manually create a state snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  description: Optional snapshot label
+      responses:
+        '201':
+          description: Snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Snapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sessions/{sessionId}/devices:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Devices
+      summary: List connected devices
+      description: Get all devices connected to a session
+      responses:
+        '200':
+          description: List of devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeviceInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /auth/token:
+    post:
+      tags:
+        - Authentication
+      summary: Get access token
+      description: Exchange credentials for JWT access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+            examples:
+              password:
+                summary: Password grant
+                value:
+                  grant_type: password
+                  username: user@example.com
+                  password: secret123
+              refresh:
+                summary: Refresh token
+                value:
+                  grant_type: refresh_token
+                  refresh_token: eyJhbGciOiJIUzI1NiIs...
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/token/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Refresh access token
+      description: Get new access token using refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - refresh_token
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/token/revoke:
+    post:
+      tags:
+        - Authentication
+      summary: Revoke token
+      description: Revoke access or refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - token
+              properties:
+                token:
+                  type: string
+                token_type_hint:
+                  type: string
+                  enum: [access_token, refresh_token]
+      responses:
+        '200':
+          description: Token revoked
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token obtained from /auth/token
+
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - timestamp
+        - version
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy, degraded]
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+        services:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [connected, disconnected, unknown]
+        uptime:
+          type: integer
+          description: Uptime in seconds
+
+    Session:
+      type: object
+      required:
+        - id
+        - userId
+        - name
+        - type
+        - status
+        - createdAt
+        - updatedAt
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+        name:
+          type: string
+          maxLength: 255
+        type:
+          type: string
+          enum: [meditation, breathing, yoga, mindfulness, custom]
+        status:
+          type: string
+          enum: [active, paused, completed, archived]
+        settings:
+          $ref: '#/components/schemas/SessionSettings'
+        state:
+          $ref: '#/components/schemas/SessionState'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+
+    SessionSettings:
+      type: object
+      properties:
+        duration:
+          type: integer
+          description: Duration in seconds
+          minimum: 0
+        audioEnabled:
+          type: boolean
+        hapticEnabled:
+          type: boolean
+        autoSave:
+          type: boolean
+        customProperties:
+          type: object
+          additionalProperties: true
+
+    SessionState:
+      type: object
+      required:
+        - version
+        - lastModified
+        - data
+      properties:
+        version:
+          type: integer
+          description: Monotonic version counter
+        lastModified:
+          type: string
+          format: date-time
+        modifiedBy:
+          type: string
+          description: Device ID that made the last change
+        data:
+          type: object
+          description: Arbitrary session-specific state data
+        checksum:
+          type: string
+          description: State integrity checksum
+
+    StateDelta:
+      type: object
+      required:
+        - baseVersion
+        - operations
+      properties:
+        baseVersion:
+          type: integer
+          description: Version this delta is based on
+        operations:
+          type: array
+          items:
+            type: object
+            required:
+              - op
+              - path
+            properties:
+              op:
+                type: string
+                enum: [add, remove, replace, move, copy, test]
+              path:
+                type: string
+                description: JSON Pointer path
+              value:
+                description: Value for add/replace operations
+        checksum:
+          type: string
+
+    Snapshot:
+      type: object
+      required:
+        - id
+        - sessionId
+        - version
+        - state
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        sessionId:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        label:
+          type: string
+        state:
+          $ref: '#/components/schemas/SessionState'
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+
+    DeviceInfo:
+      type: object
+      required:
+        - id
+        - type
+        - connectedAt
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [web, ios, android, wearable, desktop]
+        name:
+          type: string
+        userAgent:
+          type: string
+        connectedAt:
+          type: string
+          format: date-time
+        lastSeen:
+          type: string
+          format: date-time
+        capabilities:
+          type: array
+          items:
+            type: string
+
+    CreateSessionRequest:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        type:
+          type: string
+          enum: [meditation, breathing, yoga, mindfulness, custom]
+        settings:
+          $ref: '#/components/schemas/SessionSettings'
+
+    UpdateSessionRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        status:
+          type: string
+          enum: [active, paused, completed, archived]
+        settings:
+          $ref: '#/components/schemas/SessionSettings'
+
+    SessionList:
+      type: object
+      required:
+        - sessions
+        - total
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Session'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    SnapshotList:
+      type: object
+      required:
+        - snapshots
+        - total
+      properties:
+        snapshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/Snapshot'
+        total:
+          type: integer
+
+    TokenRequest:
+      type: object
+      required:
+        - grant_type
+      properties:
+        grant_type:
+          type: string
+          enum: [password, refresh_token]
+        username:
+          type: string
+        password:
+          type: string
+        refresh_token:
+          type: string
+
+    TokenResponse:
+      type: object
+      required:
+        - access_token
+        - token_type
+        - expires_in
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds
+        refresh_token:
+          type: string
+        scope:
+          type: string
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+        requestId:
+          type: string
+          format: uuid
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INVALID_REQUEST
+            message: "Invalid request parameters"
+            requestId: "550e8400-e29b-41d4-a716-446655440000"
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: "Invalid or expired token"
+            requestId: "550e8400-e29b-41d4-a716-446655440000"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: "Session not found"
+            requestId: "550e8400-e29b-41d4-a716-446655440000"
+
+    Conflict:
+      description: Resource conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VERSION_CONFLICT
+            message: "State version conflict"
+            details:
+              expectedVersion: 42
+              receivedVersion: 40
+            requestId: "550e8400-e29b-41d4-a716-446655440000"
+
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: RATE_LIMITED
+            message: "Rate limit exceeded. Try again in 60 seconds."
+            requestId: "550e8400-e29b-41d4-a716-446655440000"

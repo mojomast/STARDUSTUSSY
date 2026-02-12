@@ -1,0 +1,164 @@
+# Staging Environment Ingress Configuration
+# TLS Certificates and Ingress Rules
+
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: nginx-staging
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+spec:
+  controller: k8s.io/ingress-nginx
+
+---
+# TLS Certificate for staging environment
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harmonyflow-staging-tls
+  namespace: harmonyflow-staging
+spec:
+  secretName: harmonyflow-staging-tls-secret
+  issuerRef:
+    name: letsencrypt-staging
+    kind: ClusterIssuer
+  dnsNames:
+    - staging.harmonyflow.io
+    - api.staging.harmonyflow.io
+    - ws.staging.harmonyflow.io
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+    rotationPolicy: Always
+
+---
+# ClusterIssuer for Let's Encrypt Staging
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: devops@harmonyflow.io
+    privateKeySecretRef:
+      name: letsencrypt-staging-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx-staging
+            podTemplate:
+              spec:
+                nodeSelector:
+                  kubernetes.io/os: linux
+
+---
+# Main Ingress for Session State Service
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: session-state-service-ingress
+  namespace: harmonyflow-staging
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/connection-proxy-header: "keep-alive"
+    nginx.ingress.kubernetes.io/upstream-hash-by: "$binary_remote_addr"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Request-ID $req_id;
+spec:
+  ingressClassName: nginx-staging
+  tls:
+    - hosts:
+        - api.staging.harmonyflow.io
+        - ws.staging.harmonyflow.io
+      secretName: harmonyflow-staging-tls-secret
+  rules:
+    - host: api.staging.harmonyflow.io
+      http:
+        paths:
+          - path: /session
+            pathType: Prefix
+            backend:
+              service:
+                name: session-state-service
+                port:
+                  number: 8080
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: session-state-service
+                port:
+                  number: 8080
+    - host: ws.staging.harmonyflow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: session-state-service
+                port:
+                  number: 8080
+
+---
+# Rate Limiting Middleware
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: session-state-service-ingress-ratelimit
+  namespace: harmonyflow-staging
+  annotations:
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+    nginx.ingress.kubernetes.io/limit-rpm: "1000"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx-staging
+  rules:
+    - host: api.staging.harmonyflow.io
+      http:
+        paths:
+          - path: /session/connect
+            pathType: Prefix
+            backend:
+              service:
+                name: session-state-service
+                port:
+                  number: 8080
+
+---
+# BackendConfig for health checks (GKE specific)
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: session-state-service-backend-config
+  namespace: harmonyflow-staging
+spec:
+  healthCheck:
+    checkIntervalSec: 10
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /health/ready
+    port: 8080
+  logging:
+    enable: true
+    sampleRate: 0.1
+  securityPolicy:
+    name: harmonyflow-staging-security-policy
+  timeoutSec: 3600

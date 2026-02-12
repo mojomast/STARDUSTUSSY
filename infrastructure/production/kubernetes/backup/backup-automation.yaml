@@ -1,0 +1,344 @@
+# Backup Automation for Production Databases
+# Hourly snapshots with cross-region replication
+# Velero for cluster backups
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    app.kubernetes.io/name: velero
+    environment: production
+
+---
+# Velero BackupStorageLocation - Primary Region
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: default
+  namespace: velero
+spec:
+  provider: aws
+  objectStorage:
+    bucket: harmonyflow-backups-production
+    prefix: velero
+  config:
+    region: us-west-2
+    s3ForcePathStyle: "false"
+    s3Url: ""
+
+---
+# Velero BackupStorageLocation - DR Region
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: dr-region
+  namespace: velero
+spec:
+  provider: aws
+  objectStorage:
+    bucket: harmonyflow-backups-production-dr
+    prefix: velero
+  config:
+    region: us-east-1
+    s3ForcePathStyle: "false"
+
+---
+# VolumeSnapshotLocation for EBS snapshots
+apiVersion: velero.io/v1
+kind: VolumeSnapshotLocation
+metadata:
+  name: aws-default
+  namespace: velero
+spec:
+  provider: aws
+  config:
+    region: us-west-2
+
+---
+# Hourly Backup Schedule - Full Cluster
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: hourly-full-backup
+  namespace: velero
+spec:
+  schedule: "0 * * * *"  # Every hour
+  template:
+    storageLocation: default
+    volumeSnapshotLocations:
+      - aws-default
+    ttl: 720h0m0s  # 30 days
+    includedNamespaces:
+      - harmonyflow-production
+      - redis-production
+      - postgresql-production
+      - rabbitmq-production
+    excludedResources:
+      - events
+      - pods
+    labelSelector:
+      matchExpressions:
+        - key: backup.excluded
+          operator: DoesNotExist
+    snapshotVolumes: true
+    defaultVolumesToFsBackup: false
+
+---
+# Daily Backup Schedule - Long Term Retention
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-full-backup
+  namespace: velero
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  template:
+    storageLocation: default
+    volumeSnapshotLocations:
+      - aws-default
+    ttl: 2160h0m0s  # 90 days
+    includedNamespaces:
+      - harmonyflow-production
+      - redis-production
+      - postgresql-production
+      - rabbitmq-production
+    snapshotVolumes: true
+
+---
+# Weekly Backup to DR Region
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: weekly-dr-backup
+  namespace: velero
+spec:
+  schedule: "0 3 * * 0"  # Weekly on Sunday at 3 AM
+  template:
+    storageLocation: dr-region
+    volumeSnapshotLocations:
+      - aws-default
+    ttl: 4320h0m0s  # 180 days (6 months)
+    includedNamespaces:
+      - harmonyflow-production
+      - redis-production
+      - postgresql-production
+      - rabbitmq-production
+    snapshotVolumes: true
+
+---
+# Redis-specific backup using CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: redis-backup
+  namespace: redis-production
+spec:
+  schedule: "*/15 * * * *"  # Every 15 minutes for point-in-time recovery
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: backup-service-account
+          containers:
+            - name: redis-backup
+              image: redis:7.2-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_DIR="/backup/redis/${TIMESTAMP}"
+                  
+                  echo "Starting Redis backup at ${TIMESTAMP}..."
+                  
+                  # Create backup directory
+                  mkdir -p ${BACKUP_DIR}
+                  
+                  # Trigger BGSAVE on primary
+                  redis-cli -h redis-production-primary.redis-production.svc.cluster.local -a "${REDIS_PASSWORD}" BGSAVE
+                  
+                  # Wait for save to complete
+                  sleep 10
+                  
+                  # Find and backup the RDB file from one of the nodes
+                  kubectl cp redis-production/redis-production-cluster-0:/data/dump.rdb ${BACKUP_DIR}/dump.rdb
+                  kubectl cp redis-production/redis-production-cluster-0:/data/appendonly.aof ${BACKUP_DIR}/appendonly.aof 2>/dev/null || true
+                  
+                  # Compress backup
+                  tar -czf ${BACKUP_DIR}.tar.gz -C /backup/redis ${TIMESTAMP}
+                  
+                  # Upload to S3
+                  aws s3 cp ${BACKUP_DIR}.tar.gz s3://harmonyflow-backups-production/redis/${TIMESTAMP}.tar.gz --storage-class STANDARD_IA
+                  
+                  # Clean up old backups (keep last 96 = 24 hours with 15-min intervals)
+                  aws s3 ls s3://harmonyflow-backups-production/redis/ | sort | head -n -96 | awk '{print $4}' | xargs -I {} aws s3 rm s3://harmonyflow-backups-production/redis/{}
+                  
+                  echo "Redis backup completed: ${TIMESTAMP}"
+              env:
+                - name: REDIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: redis-production-secret
+                      key: password
+                - name: AWS_REGION
+                  value: "us-west-2"
+              volumeMounts:
+                - name: backup-temp
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          volumes:
+            - name: backup-temp
+              emptyDir: {}
+
+---
+# PostgreSQL backup using pg_basebackup
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgresql-backup
+  namespace: postgresql-production
+spec:
+  schedule: "*/30 * * * *"  # Every 30 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: backup-service-account
+          containers:
+            - name: postgresql-backup
+              image: bitnami/postgresql:16
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_DIR="/backup/postgresql/basebackup-${TIMESTAMP}"
+                  
+                  echo "Starting PostgreSQL backup at ${TIMESTAMP}..."
+                  
+                  # Create backup directory
+                  mkdir -p ${BACKUP_DIR}
+                  
+                  # Perform base backup
+                  PGPASSWORD="${POSTGRES_PASSWORD}" pg_basebackup \
+                    -h postgresql-production-primary.postgresql-production.svc.cluster.local \
+                    -U harmonyflow \
+                    -D ${BACKUP_DIR} \
+                    -Fp \
+                    -Xs \
+                    -P \
+                    -v \
+                    -w
+                  
+                  if [ $? -eq 0 ]; then
+                    # Compress backup
+                    tar -czf ${BACKUP_DIR}.tar.gz -C /backup/postgresql basebackup-${TIMESTAMP}
+                    
+                    # Upload to S3
+                    aws s3 cp ${BACKUP_DIR}.tar.gz s3://harmonyflow-backups-production/postgresql/basebackup-${TIMESTAMP}.tar.gz --storage-class STANDARD_IA
+                    
+                    # Create WAL archive backup
+                    PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
+                      -h postgresql-production-primary.postgresql-production.svc.cluster.local \
+                      -U harmonyflow \
+                      -d harmonyflow \
+                      -Fc \
+                      -f /backup/postgresql/harmonyflow-${TIMESTAMP}.dump
+                    
+                    aws s3 cp /backup/postgresql/harmonyflow-${TIMESTAMP}.dump s3://harmonyflow-backups-production/postgresql/harmonyflow-${TIMESTAMP}.dump --storage-class STANDARD_IA
+                    
+                    # Clean up old backups (keep last 48 = 24 hours with 30-min intervals)
+                    aws s3 ls s3://harmonyflow-backups-production/postgresql/ | grep "basebackup" | sort | head -n -48 | awk '{print $4}' | xargs -I {} aws s3 rm s3://harmonyflow-backups-production/postgresql/{}
+                    aws s3 ls s3://harmonyflow-backups-production/postgresql/ | grep "harmonyflow" | sort | head -n -48 | awk '{print $4}' | xargs -I {} aws s3 rm s3://harmonyflow-backups-production/postgresql/{}
+                    
+                    echo "PostgreSQL backup completed: ${TIMESTAMP}"
+                  else
+                    echo "PostgreSQL backup failed!"
+                    exit 1
+                  fi
+              env:
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgresql-production-secret
+                      key: password
+                - name: AWS_REGION
+                  value: "us-west-2"
+              volumeMounts:
+                - name: backup-temp
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi
+                limits:
+                  cpu: 1000m
+                  memory: 2Gi
+          volumes:
+            - name: backup-temp
+              emptyDir:
+                sizeLimit: 50Gi
+
+---
+# ServiceAccount for backup jobs
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-service-account
+  namespace: velero
+
+---
+# ClusterRole for backup operations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backup-cluster-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log", "persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots", "volumesnapshotcontents", "volumesnapshotclasses"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backup-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backup-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: backup-service-account
+    namespace: velero
+  - kind: ServiceAccount
+    name: backup-service-account
+    namespace: redis-production
+  - kind: ServiceAccount
+    name: backup-service-account
+    namespace: postgresql-production

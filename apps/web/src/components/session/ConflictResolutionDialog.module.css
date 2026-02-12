@@ -1,0 +1,266 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.dialog {
+  background: white;
+  border-radius: 1rem;
+  max-width: 700px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+.header {
+  padding: 1.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0;
+}
+
+.closeButton {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  border: none;
+  background: #f3f4f6;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  transition: all 0.2s ease;
+}
+
+.closeButton:hover {
+  background: #e5e7eb;
+}
+
+.content {
+  padding: 1.5rem;
+  overflow-y: auto;
+  max-height: calc(90vh - 200px);
+}
+
+.warning {
+  background: #fef3c7;
+  border-left: 4px solid #f59e0b;
+  padding: 1rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  margin-bottom: 1.5rem;
+}
+
+.warningText {
+  margin: 0;
+  color: #92400e;
+  font-size: 0.875rem;
+}
+
+.compareGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.statePanel {
+  background: #f9fafb;
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.panelHeader {
+  padding: 0.75rem 1rem;
+  background: #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.panelTitle {
+  font-weight: 600;
+  color: #374151;
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.panelBadge {
+  font-size: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-weight: 500;
+}
+
+.panelBadge.local {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.panelBadge.remote {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.panelContent {
+  padding: 1rem;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.stateCode {
+  margin: 0;
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #374151;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.differences {
+  background: #fef2f2;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.differencesTitle {
+  font-weight: 600;
+  color: #991b1b;
+  font-size: 0.875rem;
+  margin: 0 0 0.75rem 0;
+}
+
+.differenceList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.differenceItem {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  font-size: 0.875rem;
+  color: #7f1d1d;
+  border-bottom: 1px solid #fecaca;
+}
+
+.differenceItem:last-child {
+  border-bottom: none;
+}
+
+.differenceIcon {
+  color: #ef4444;
+}
+
+.resolutionOptions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.option {
+  padding: 1rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 0.75rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: white;
+}
+
+.option:hover {
+  border-color: #3b82f6;
+}
+
+.option.selected {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.optionIcon {
+  font-size: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.optionTitle {
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 0.875rem;
+  margin: 0 0 0.25rem 0;
+}
+
+.optionDescription {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin: 0;
+}
+
+.footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.button {
+  padding: 0.625rem 1.25rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.button.primary {
+  background: #3b82f6;
+  color: white;
+}
+
+.button.primary:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button.secondary {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.button.secondary:hover {
+  background: #e5e7eb;
+}
+
+@media (max-width: 640px) {
+  .compareGrid {
+    grid-template-columns: 1fr;
+  }
+  
+  .resolutionOptions {
+    grid-template-columns: 1fr;
+  }
+}

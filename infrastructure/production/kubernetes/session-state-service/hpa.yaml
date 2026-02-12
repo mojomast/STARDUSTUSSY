@@ -1,0 +1,95 @@
+# Horizontal Pod Autoscaler for Session State Service
+# Production Environment
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: session-state-service-hpa
+  namespace: harmonyflow-production
+  labels:
+    app: session-state-service
+    environment: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: session-state-service
+  minReplicas: 5
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Pods
+    pods:
+      metric:
+        name: sessions_active
+      target:
+        type: AverageValue
+        averageValue: "1000"
+  - type: Pods
+    pods:
+      metric:
+        name: websockets_connected
+      target:
+        type: AverageValue
+        averageValue: "500"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
+
+---
+# Vertical Pod Autoscaler Recommendation
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: session-state-service-vpa
+  namespace: harmonyflow-production
+  labels:
+    app: session-state-service
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: session-state-service
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: session-state-service
+      minAllowed:
+        cpu: 500m
+        memory: 1Gi
+      maxAllowed:
+        cpu: 4000m
+        memory: 8Gi
+      controlledResources: ["cpu", "memory"]
+      controlledValues: RequestsAndLimits

@@ -1,0 +1,525 @@
+# Session State Service - Production Deployment with Security
+# Version: v1.0.0
+# Environment: production
+# Replicas: 5 with HPA
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harmonyflow-production
+  labels:
+    environment: production
+    criticality: high
+    app.kubernetes.io/name: harmonyflow
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-production
+  labels:
+    app: session-state-service
+automountServiceAccountToken: false
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-production
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: session-state-service
+subjects:
+- kind: ServiceAccount
+  name: session-state-service
+  namespace: harmonyflow-production
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: session-state-service-config
+  namespace: harmonyflow-production
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  SERVER_PORT: "8080"
+  METRICS_PORT: "9090"
+  HEALTH_PORT: "8080"
+  
+  REDIS_HOST: "redis-production-cluster.redis-production.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_CLUSTER_MODE: "true"
+  REDIS_POOL_SIZE: "50"
+  REDIS_POOL_TIMEOUT: "10s"
+  REDIS_MAX_RETRIES: "5"
+  REDIS_READ_TIMEOUT: "3s"
+  REDIS_WRITE_TIMEOUT: "3s"
+  REDIS_DIAL_TIMEOUT: "5s"
+  
+  SESSION_TTL: "168h"
+  SESSION_CHECKPOINT_INTERVAL: "30s"
+  MAX_SESSIONS_PER_USER: "10"
+  MAX_CONCURRENT_CONNECTIONS: "50000"
+  SESSION_CLEANUP_INTERVAL: "1h"
+  
+  WS_READ_BUFFER_SIZE: "4096"
+  WS_WRITE_BUFFER_SIZE: "4096"
+  WS_PING_INTERVAL: "30s"
+  WS_PONG_TIMEOUT: "60s"
+  WS_MAX_MESSAGE_SIZE: "1048576"
+  
+  HANDOFF_TIMEOUT: "30s"
+  HANDOFF_RETRY_ATTEMPTS: "3"
+  HANDOFF_MAX_QUEUE_SIZE: "1000"
+  
+  CIRCUIT_BREAKER_THRESHOLD: "10"
+  CIRCUIT_BREAKER_RESET_TIMEOUT: "60s"
+  CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS: "3"
+  
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_REQUESTS_PER_SECOND: "1000"
+  RATE_LIMIT_BURST: "1500"
+  RATE_LIMIT_IP_WINDOW: "1m"
+  RATE_LIMIT_IP_MAX: "100"
+  
+  JAEGER_ENDPOINT: "http://jaeger-collector.monitoring.svc.cluster.local:14268/api/traces"
+  TRACING_ENABLED: "true"
+  TRACING_SAMPLE_RATE: "0.1"
+  
+  PROMETHEUS_ENABLED: "true"
+  PROMETHEUS_PATH: "/metrics"
+  
+  ENABLE_SECURITY_HEADERS: "true"
+  ENABLE_CORS: "true"
+  CORS_ALLOWED_ORIGINS: "https://harmonyflow.io,https://www.harmonyflow.io"
+  CORS_ALLOWED_METHODS: "GET,POST,PUT,DELETE,OPTIONS"
+  CORS_ALLOWED_HEADERS: "Authorization,Content-Type,X-Requested-With"
+  
+  ENABLE_HTTPS_REDIRECT: "true"
+  ENABLE_HSTS: "true"
+  HSTS_MAX_AGE: "31536000"
+  HSTS_INCLUDE_SUBDOMAINS: "true"
+  HSTS_PRELOAD: "true"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: session-state-service-secrets
+  namespace: harmonyflow-production
+type: Opaque
+stringData:
+  REDIS_PASSWORD: ""
+  API_KEY: ""
+  JWT_SECRET: ""
+  ENCRYPTION_KEY: ""
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-production
+  labels:
+    app: session-state-service
+    version: v1.0.0
+    environment: production
+    criticality: high
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: session-state-service
+  template:
+    metadata:
+      labels:
+        app: session-state-service
+        version: v1.0.0
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+        external-secrets.io/secret-sync-watch: "true"
+        external-secrets.io/secret-sync-refresh-interval: "1h"
+    spec:
+      serviceAccountName: session-state-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+      - name: init-check
+        image: busybox:1.36
+        command: ['sh', '-c', 'echo "Init check passed"']
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      containers:
+      - name: session-state-service
+        image: ghcr.io/harmonyflow/session-state-service:v1.0.0
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        - name: websocket
+          containerPort: 8081
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: session-state-service-config
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: session-state-service-secrets
+              key: REDIS_PASSWORD
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: session-state-service-secrets
+              key: API_KEY
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: session-state-service-secrets
+              key: JWT_SECRET
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: session-state-service-secrets
+              key: ENCRYPTION_KEY
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: GOMAXPROCS
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.cpu
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 2Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+            ephemeral-storage: "10Gi"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+          successThreshold: 1
+        startupProbe:
+          httpGet:
+            path: /health/startup
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 30
+          successThreshold: 1
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /var/cache
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: "1Gi"
+      - name: cache
+        emptyDir:
+          sizeLimit: "2Gi"
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: session-state-service
+            topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: session-state-service
+              topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - m5.large
+                - m5.xlarge
+                - c5.large
+                - c5.xlarge
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - us-east-1a
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: session-state-service
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-production
+  labels:
+    app: session-state-service
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: 9090
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  - port: 8081
+    targetPort: websocket
+    protocol: TCP
+    name: websocket
+  selector:
+    app: session-state-service
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: session-state-service-hpa
+  namespace: harmonyflow-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: session-state-service
+  minReplicas: 5
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Pods
+    pods:
+      metric:
+        name: sessions_active
+      target:
+        type: AverageValue
+        averageValue: "1000"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: session-state-service-pdb
+  namespace: harmonyflow-production
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: session-state-service
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-state-service-network-policy
+  namespace: harmonyflow-production
+spec:
+  podSelector:
+    matchLabels:
+      app: session-state-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - namespaceSelector:
+        matchLabels:
+          name: harmonyflow-production
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+    - protocol: TCP
+      port: 9090
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: redis-production
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 14268
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: TCP
+      port: 53
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-production
+  labels:
+    app: session-state-service
+spec:
+  selector:
+    matchLabels:
+      app: session-state-service
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+    scheme: http

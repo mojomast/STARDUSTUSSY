@@ -1,0 +1,322 @@
+name: Test Suite CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'services/**'
+      - 'packages/**'
+      - 'tests/**'
+      - 'infrastructure/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'services/**'
+      - 'packages/**'
+      - 'tests/**'
+      - 'infrastructure/**'
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: tests
+        run: npm ci
+      
+      - name: Run ESLint
+        working-directory: tests
+        run: npm run lint
+      
+      - name: Type check
+        working-directory: tests
+        run: npx tsc --noEmit
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: tests
+        run: npm ci
+      
+      - name: Run unit tests
+        working-directory: tests
+        run: npm run test:unit -- --coverage
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          directory: tests/reports/coverage
+          flags: unit-tests
+          name: unit-test-coverage
+
+  go-unit-tests:
+    name: Go Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: Run Go tests
+        working-directory: services/session-state-service
+        run: go test -v -race -coverprofile=coverage.out ./...
+      
+      - name: Upload Go coverage
+        uses: codecov/codecov-action@v3
+        with:
+          directory: services/session-state-service
+          flags: go-unit-tests
+          name: go-test-coverage
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests, go-unit-tests]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: harmonyflow
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: harmonyflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+      
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: Install dependencies
+        working-directory: tests
+        run: npm ci
+      
+      - name: Build session state service
+        working-directory: services/session-state-service
+        run: go build -o session-state-service ./cmd/main.go
+      
+      - name: Start session state service
+        working-directory: services/session-state-service
+        env:
+          REDIS_ADDR: localhost:6379
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: harmonyflow
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: harmonyflow
+          SERVER_ADDR: :8080
+          JWT_SECRET: test-secret-key
+        run: |
+          ./session-state-service &
+          sleep 5
+          curl --retry 10 --retry-delay 1 http://localhost:8080/health
+      
+      - name: Run integration tests
+        working-directory: tests
+        env:
+          API_BASE_URL: http://localhost:8080
+          WS_URL: ws://localhost:8080/ws
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+        run: npm run test:integration
+      
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: tests/reports/
+
+  api-tests:
+    name: API Tests
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: tests
+        run: npm ci
+      
+      - name: Run API tests
+        working-directory: tests
+        env:
+          API_BASE_URL: http://localhost:8080
+        run: npm run test:api
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: tests
+        run: npm ci
+      
+      - name: Install Playwright
+        working-directory: tests
+        run: npx playwright install --with-deps
+      
+      - name: Build web app
+        working-directory: apps/web
+        run: npm ci && npm run build
+      
+      - name: Run E2E tests
+        working-directory: tests
+        run: npm run test:e2e
+      
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/reports/playwright-report/
+
+  load-tests:
+    name: Load Tests
+    runs-on: ubuntu-latest
+    needs: api-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup k6
+        run: |
+          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+      
+      - name: Run API load tests
+        working-directory: tests
+        env:
+          API_BASE_URL: ${{ secrets.STAGING_API_URL }}
+        run: |
+          k6 run --out json=reports/load-test-results.json load/api-load.js
+      
+      - name: Upload load test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: load-test-results
+          path: tests/reports/
+
+  performance-benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    needs: api-tests
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup k6
+        run: |
+          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+      
+      - name: Run performance benchmarks
+        working-directory: tests
+        env:
+          API_BASE_URL: ${{ secrets.STAGING_API_URL }}
+        run: |
+          k6 run --out json=reports/performance-benchmarks.json performance/benchmarks.js
+      
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: performance-benchmarks
+          path: tests/reports/
+
+  test-report:
+    name: Generate Test Report
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, api-tests, e2e-tests]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+      
+      - name: Generate combined report
+        run: |
+          mkdir -p combined-reports
+          cp -r */* combined-reports/ || true
+      
+      - name: Upload combined report
+        uses: actions/upload-artifact@v3
+        with:
+          name: combined-test-report
+          path: combined-reports/

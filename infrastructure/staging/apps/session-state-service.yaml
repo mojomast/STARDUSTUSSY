@@ -1,0 +1,382 @@
+# Session State Service - Staging Deployment
+# Version: v1.0.0
+# Environment: staging
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harmonyflow-staging
+  labels:
+    environment: staging
+    linkerd.io/inject: enabled
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: session-state-service-config
+  namespace: harmonyflow-staging
+data:
+  # Application configuration
+  ENVIRONMENT: "staging"
+  LOG_LEVEL: "info"
+  SERVER_PORT: "8080"
+  METRICS_PORT: "9090"
+  
+  # Redis configuration
+  REDIS_HOST: "redis-cluster.redis-staging.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_POOL_SIZE: "20"
+  REDIS_POOL_TIMEOUT: "5s"
+  REDIS_MAX_RETRIES: "3"
+  
+  # Session configuration
+  SESSION_TTL: "168h"  # 7 days
+  SESSION_CHECKPOINT_INTERVAL: "30s"
+  MAX_SESSIONS_PER_USER: "5"
+  MAX_CONCURRENT_CONNECTIONS: "10000"
+  
+  # WebSocket configuration
+  WS_READ_BUFFER_SIZE: "1024"
+  WS_WRITE_BUFFER_SIZE: "1024"
+  WS_PING_INTERVAL: "30s"
+  WS_PONG_TIMEOUT: "60s"
+  
+  # Handoff configuration
+  HANDOFF_TIMEOUT: "30s"
+  HANDOFF_RETRY_ATTEMPTS: "3"
+  
+  # Circuit breaker configuration
+  CIRCUIT_BREAKER_THRESHOLD: "5"
+  CIRCUIT_BREAKER_RESET_TIMEOUT: "30s"
+  
+  # Rate limiting
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_REQUESTS_PER_SECOND: "100"
+  RATE_LIMIT_BURST: "150"
+
+---
+# External Secrets Operator configuration for Staging
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: session-state-service-secrets
+  namespace: harmonyflow-staging
+  labels:
+    app: session-state-service
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: vault-backend-staging
+  target:
+    name: session-state-service-secrets
+    creationPolicy: Owner
+    template:
+      type: Opaque
+      data:
+        JWT_SECRET: "{{ .JWT_SECRET }}"
+        JWT_REFRESH_SECRET: "{{ .JWT_REFRESH_SECRET }}"
+        API_KEY: "{{ .API_KEY }}"
+  data:
+  - secretKey: JWT_SECRET
+    remoteRef:
+      key: secret/data/harmonyflow/session-state-service
+      property: jwt-secret
+  - secretKey: JWT_REFRESH_SECRET
+    remoteRef:
+      key: secret/data/harmonyflow/session-state-service
+      property: jwt-refresh-secret
+  - secretKey: API_KEY
+    remoteRef:
+      key: secret/data/harmonyflow/session-state-service
+      property: api-key
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-staging
+  labels:
+    app: session-state-service
+    version: v1.0.0
+    environment: staging
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: session-state-service
+  template:
+    metadata:
+      labels:
+        app: session-state-service
+        version: v1.0.0
+        environment: staging
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+        linkerd.io/inject: "enabled"
+        external-secrets.io/secret-sync-watch: "true"
+        external-secrets.io/secret-sync-refresh-interval: "1h"
+    spec:
+      serviceAccountName: session-state-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: session-state-service
+          image: ghcr.io/harmonyflow/session-state-service:v1.0.0-staging
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: session-state-service-config
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: session-state-service-secrets
+                  key: REDIS_PASSWORD
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: session-state-service-secrets
+                  key: API_KEY
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: session-state-service-secrets
+                  key: JWT_SECRET
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - session-state-service
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: session-state-service
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: session-state-service-hpa
+  namespace: harmonyflow-staging
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: session-state-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: sessions_active
+        target:
+          type: AverageValue
+          averageValue: "500"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-staging
+  labels:
+    app: session-state-service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    app: session-state-service
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: session-state-service
+  namespace: harmonyflow-staging
+  labels:
+    app: session-state-service
+automountServiceAccountToken: false
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: session-state-service-pdb
+  namespace: harmonyflow-staging
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: session-state-service
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-state-service-network-policy
+  namespace: harmonyflow-staging
+spec:
+  podSelector:
+    matchLabels:
+      app: session-state-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow-staging
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: redis-staging
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kube-system
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443

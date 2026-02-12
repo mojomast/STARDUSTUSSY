@@ -1,0 +1,229 @@
+# Vault Initialization Job for Production
+# Initializes Vault, enables auth methods, and configures secrets engines
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-init
+  namespace: vault
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-init
+  namespace: vault
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-init
+  namespace: vault
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vault-init
+subjects:
+- kind: ServiceAccount
+  name: vault-init
+  namespace: vault
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-init-keys
+  namespace: vault
+type: Opaque
+data: {}
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-init
+  namespace: vault
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: vault-init
+    spec:
+      serviceAccountName: vault-init
+      restartPolicy: OnFailure
+      initContainers:
+      - name: wait-for-vault
+        image: hashicorp/vault:1.15.4
+        command:
+        - sh
+        - -c
+        - |
+          until vault status -tls-skip-verify; do
+            echo "Waiting for Vault to be ready..."
+            sleep 5
+          done
+        env:
+        - name: VAULT_ADDR
+          value: "https://vault.vault:8200"
+        - name: VAULT_SKIP_VERIFY
+          value: "true"
+      containers:
+      - name: vault-init
+        image: hashicorp/vault:1.15.4
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          
+          export VAULT_ADDR="https://vault.vault:8200"
+          export VAULT_SKIP_VERIFY="true"
+          
+          echo "Checking if Vault is initialized..."
+          if vault status -tls-skip-verify | grep -q "Initialized.*true"; then
+            echo "Vault is already initialized."
+            exit 0
+          fi
+          
+          echo "Initializing Vault..."
+          vault operator init -key-shares=5 -key-threshold=3 -format=json > /tmp/init-output.json
+          
+          echo "Saving initialization keys..."
+          cat /tmp/init-output.json | jq -r '.unseal_keys_b64[]' > /tmp/unseal-keys.txt
+          cat /tmp/init-output.json | jq -r '.root_token' > /tmp/root-token.txt
+          
+          echo "Storing keys in Kubernetes Secret..."
+          kubectl create secret generic vault-init-keys \
+            --from-file=unseal-keys.txt=/tmp/unseal-keys.txt \
+            --from-file=root-token.txt=/tmp/root-token.txt \
+            --namespace=vault || true
+          
+          echo "Unsealing Vault..."
+          for i in 1 2 3; do
+            KEY=$(sed "${i}q;d" /tmp/unseal-keys.txt)
+            vault operator unseal -tls-skip-verify "$KEY"
+          done
+          
+          echo "Logging into Vault..."
+          export VAULT_TOKEN=$(cat /tmp/root-token.txt)
+          
+          echo "Enabling audit logging..."
+          vault audit enable file file_path=/vault/audit/audit.log -tls-skip-verify || true
+          
+          echo "Enabling Kubernetes auth method..."
+          vault auth enable kubernetes -tls-skip-verify || true
+          
+          TOKEN_REVIEWER_JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K8S_HOST="https://$KUBERNETES_PORT_443_TCP_ADDR:443"
+          K8S_CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          
+          vault write auth/kubernetes/config \
+            token_reviewer_jwt="$TOKEN_REVIEWER_JWT" \
+            kubernetes_host="$K8S_HOST" \
+            kubernetes_ca_cert=@"$K8S_CACERT" \
+            ttl=1h \
+            -tls-skip-verify
+          
+          echo "Enabling secrets engines..."
+          vault secrets enable -path=secret kv-v2 -tls-skip-verify || true
+          vault secrets enable -path=database database -tls-skip-verify || true
+          vault secrets enable -path=transit transit -tls-skip-verify || true
+          
+          echo "Creating policies..."
+          
+          cat > /tmp/session-state-policy.hcl << 'EOF'
+          path "secret/data/harmonyflow/session-state-service" {
+            capabilities = ["read", "list"]
+          }
+          path "secret/data/harmonyflow/redis" {
+            capabilities = ["read"]
+          }
+          path "transit/encrypt/session-state" {
+            capabilities = ["update"]
+          }
+          path "transit/decrypt/session-state" {
+            capabilities = ["update"]
+          }
+          EOF
+          vault policy write session-state-service /tmp/session-state-policy.hcl -tls-skip-verify
+          
+          cat > /tmp/external-secrets-policy.hcl << 'EOF'
+          path "secret/data/harmonyflow/*" {
+            capabilities = ["read", "list"]
+          }
+          EOF
+          vault policy write external-secrets /tmp/external-secrets-policy.hcl -tls-skip-verify
+          
+          cat > /tmp/admin-policy.hcl << 'EOF'
+          path "*" {
+            capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+          }
+          EOF
+          vault policy write admin /tmp/admin-policy.hcl -tls-skip-verify
+          
+          echo "Creating Kubernetes auth roles..."
+          vault write auth/kubernetes/role/session-state-service \
+            bound_service_account_names=session-state-service \
+            bound_service_account_namespaces=harmonyflow-production \
+            policies=session-state-service \
+            ttl=1h \
+            max_ttl=24h \
+            -tls-skip-verify
+          
+          vault write auth/kubernetes/role/external-secrets \
+            bound_service_account_names=external-secrets \
+            bound_service_account_namespaces=external-secrets \
+            policies=external-secrets \
+            ttl=1h \
+            max_ttl=24h \
+            -tls-skip-verify
+          
+          echo "Configuring transit encryption..."
+          vault write -f transit/keys/session-state -tls-skip-verify || true
+          
+          echo "Vault initialization completed successfully!"
+        env:
+        - name: KUBERNETES_PORT_443_TCP_ADDR
+          value: "kubernetes.default.svc"
+        - name: KUBERNETES_PORT
+          value: "tcp://kubernetes.default.svc:443"
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: vault-kubeconfig
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: vault-kubeconfig
+        secret:
+          secretName: external-secrets-token
+
+---
+# PodDisruptionBudget for Vault Init Job
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vault-init-pdb
+  namespace: vault
+spec:
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app: vault-init

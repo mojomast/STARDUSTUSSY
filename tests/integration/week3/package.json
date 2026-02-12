@@ -1,0 +1,34 @@
+{
+  "name": "@harmonyflow/week3-tests",
+  "version": "1.0.0",
+  "description": "HarmonyFlow SyncBridge - Week 3 Multi-Device Integration Tests",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:ui": "playwright test --ui",
+    "test:scenario1": "playwright test e2e/mobile-to-web-handoff.spec.ts",
+    "test:scenario2": "playwright test e2e/simultaneous-multi-device.spec.ts",
+    "test:scenario3": "playwright test e2e/network-interruption.spec.ts",
+    "test:scenario4": "playwright test e2e/session-expiration.spec.ts",
+    "test:scenario5": "playwright test e2e/device-disconnection.spec.ts",
+    "benchmark": "npm run benchmark:handoff && npm run benchmark:concurrent && npm run benchmark:memory",
+    "benchmark:handoff": "node benchmarks/handoff-latency.js",
+    "benchmark:concurrent": "node benchmarks/concurrent-devices.js",
+    "benchmark:memory": "node benchmarks/memory-usage.js",
+    "report": "./scripts/generate-report.sh",
+    "report:html": "playwright show-report reports/playwright-report",
+    "lint": "eslint . --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.40.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.2"
+  }
+}

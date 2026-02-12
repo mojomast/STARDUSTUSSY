@@ -1,0 +1,380 @@
+# Production Security Hardening
+# Network policies (deny-all default)
+# Pod Security Standards
+# Secrets encryption at rest
+# TLS everywhere (service mesh)
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harmonyflow-production
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/name: harmonyflow
+    environment: production
+
+---
+# Default deny-all network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: harmonyflow-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow ingress from ingress-nginx
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-nginx
+  namespace: harmonyflow-production
+spec:
+  podSelector:
+    matchLabels:
+      app: session-state-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+
+---
+# Allow egress to databases
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-database-access
+  namespace: harmonyflow-production
+spec:
+  podSelector:
+    matchLabels:
+      app: session-state-service
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: redis-production
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: postgresql-production
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: rabbitmq-production
+      ports:
+        - protocol: TCP
+          port: 5672
+
+---
+# Allow DNS resolution
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: harmonyflow-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Pod Security Policy (deprecated, use Pod Security Standards instead)
+# Included for legacy clusters
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: restricted
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfiles: 'runtime/default,docker/default'
+    apparmor.security.beta.kubernetes.io/allowedProfiles: 'runtime/default'
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: 'runtime/default'
+    apparmor.security.beta.kubernetes.io/defaultProfileName: 'runtime/default'
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+    - 'csi'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1
+        max: 65535
+  runAsGroup:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1
+        max: 65535
+  supplementalGroups:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1
+        max: 65535
+  readOnlyRootFilesystem: true
+
+---
+# ClusterRole for restricted PSP
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: psp:restricted
+rules:
+  - apiGroups: ['policy']
+    resources: ['podsecuritypolicies']
+    verbs: ['use']
+    resourceNames:
+      - restricted
+
+---
+# ClusterRoleBinding for restricted PSP
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: psp:restricted:harmonyflow-production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: psp:restricted
+subjects:
+  - kind: Group
+    name: system:serviceaccounts:harmonyflow-production
+    apiGroup: rbac.authorization.k8s.io
+
+---
+# Resource Quotas
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: harmonyflow-production-quota
+  namespace: harmonyflow-production
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+    persistentvolumeclaims: "20"
+    services.loadbalancers: "5"
+    services.nodeports: "10"
+    secrets: "50"
+    configmaps: "50"
+
+---
+# Limit Ranges
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: harmonyflow-production-limits
+  namespace: harmonyflow-production
+spec:
+  limits:
+    - default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "2000m"
+        memory: "4Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      type: Container
+
+---
+# Secrets Encryption Configuration
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+      - configmaps
+      - ingresses.extensions
+      - ingresses.networking.k8s.io
+    providers:
+      - aescbc:
+          keys:
+            - name: key1
+              secret: CHANGE_ME_32_BYTE_BASE64_ENCODED_SECRET
+      - identity: {}
+
+---
+# Service Account for applications
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harmonyflow-production-sa
+  namespace: harmonyflow-production
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/harmonyflow-production-role
+automountServiceAccountToken: false
+
+---
+# RBAC for service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: harmonyflow-production-role
+  namespace: harmonyflow-production
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["harmonyflow-config"]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harmonyflow-production-binding
+  namespace: harmonyflow-production
+subjects:
+  - kind: ServiceAccount
+    name: harmonyflow-production-sa
+    namespace: harmonyflow-production
+roleRef:
+  kind: Role
+  name: harmonyflow-production-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Kyverno Policies for additional security
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-labels
+spec:
+  validationFailureAction: enforce
+  rules:
+    - name: check-for-labels
+      match:
+        resources:
+          kinds:
+            - Pod
+      validate:
+        message: "All pods must have app, version, and environment labels"
+        pattern:
+          metadata:
+            labels:
+              app: "?*"
+              version: "?*"
+              environment: "?*"
+
+---
+# Require resource limits
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resources
+spec:
+  validationFailureAction: enforce
+  rules:
+    - name: check-resources
+      match:
+        resources:
+          kinds:
+            - Pod
+      validate:
+        message: "All containers must have resource limits and requests defined"
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+                    cpu: "?*"
+                  requests:
+                    memory: "?*"
+                    cpu: "?*"
+
+---
+# Require non-root user
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root
+spec:
+  validationFailureAction: enforce
+  rules:
+    - name: check-non-root
+      match:
+        resources:
+          kinds:
+            - Pod
+      validate:
+        message: "Containers must not run as root"
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  capabilities:
+                    drop:
+                      - ALL
+
+---
+# Pod Disruption Budget for security
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harmonyflow-production-pdb
+  namespace: harmonyflow-production
+spec:
+  minAvailable: 50%
+  selector:
+    matchLabels:
+      app: session-state-service

@@ -1,0 +1,235 @@
+# Linkerd Service Mesh Installation
+# Version: 2.14.x
+# Purpose: mTLS, traffic management, observability for HarmonyFlow microservices
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkerd
+  labels:
+    linkerd.io/is-control-plane: "true"
+    config.linkerd.io/admission-webhooks: disabled
+
+---
+# Linkerd Control Plane Installation
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: linkerd-control-plane
+  namespace: linkerd
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: linkerd-control-plane
+      version: "1.16.0"
+      sourceRef:
+        kind: HelmRepository
+        name: linkerd
+        namespace: flux-system
+  values:
+    controllerReplicas: 3
+    controllerLogLevel: info
+    proxy:
+      resources:
+        cpu:
+          request: 100m
+          limit: 500m
+        memory:
+          request: 128Mi
+          limit: 512Mi
+    identity:
+      issuer:
+        # Enable automatic TLS certificate rotation
+        tls:
+          certPEM: |
+            # cert-manager will inject this
+          keyPEM: |
+            # cert-manager will inject this
+    # Enable High Availability mode for production
+    enablePodAntiAffinity: true
+    # Enable proxy injection by default
+    proxyInjector:
+      enabled: true
+    # Enable service profile auto-generation
+    profileValidator:
+      enabled: true
+
+---
+# Linkerd Viz (Observability Stack)
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: linkerd-viz
+  namespace: linkerd-viz
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: linkerd-viz
+      version: "30.12.0"
+      sourceRef:
+        kind: HelmRepository
+        name: linkerd
+        namespace: flux-system
+  values:
+    dashboard:
+      replicas: 2
+      resources:
+        cpu:
+          request: 100m
+          limit: 300m
+        memory:
+          request: 256Mi
+          limit: 512Mi
+    prometheus:
+      resources:
+        cpu:
+          request: 200m
+          limit: 1000m
+        memory:
+          request: 512Mi
+          limit: 2Gi
+      retention: 720h  # 30 days
+    tap:
+      replicas: 2
+
+---
+# Linkerd Jaeger (Distributed Tracing)
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: linkerd-jaeger
+  namespace: linkerd-jaeger
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: linkerd-jaeger
+      version: "30.12.0"
+      sourceRef:
+        kind: HelmRepository
+        name: linkerd
+        namespace: flux-system
+  values:
+    jaeger:
+      resources:
+        cpu:
+          request: 100m
+          limit: 500m
+        memory:
+          request: 256Mi
+          limit: 1Gi
+
+---
+# Namespace for Linkerd Viz
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkerd-viz
+  annotations:
+    linkerd.io/inject: enabled
+
+---
+# Namespace for Linkerd Jaeger
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkerd-jaeger
+  annotations:
+    linkerd.io/inject: enabled
+
+---
+# Network Policies for Linkerd
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: linkerd-control-plane-policy
+  namespace: linkerd
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              linkerd.io/is-control-plane: "true"
+      ports:
+        - protocol: TCP
+          port: 8086
+        - protocol: TCP
+          port: 8089
+        - protocol: TCP
+          port: 8443
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              linkerd.io/is-control-plane: "true"
+
+---
+# Service Profile for Session State Service
+apiVersion: linkerd.io/v1alpha2
+kind: ServiceProfile
+metadata:
+  name: session-state-service.harmonyflow.svc.cluster.local
+  namespace: harmonyflow
+spec:
+  routes:
+    - name: /session/connect
+      condition:
+        method: GET
+        pathRegex: /session/connect
+      isRetryable: true
+      timeout: 10s
+    - name: /session/snapshot
+      condition:
+        method: POST
+        pathRegex: /session/snapshot
+      isRetryable: true
+      timeout: 5s
+    - name: /session/handoff
+      condition:
+        method: POST
+        pathRegex: /session/handoff
+      isRetryable: false
+      timeout: 30s
+
+---
+# Service Profile for Content Delivery Service
+apiVersion: linkerd.io/v1alpha2
+kind: ServiceProfile
+metadata:
+  name: content-delivery-service.harmonyflow.svc.cluster.local
+  namespace: harmonyflow
+spec:
+  routes:
+    - name: /content/chunk
+      condition:
+        method: GET
+        pathRegex: /content/chunk/.*
+      isRetryable: true
+      timeout: 30s
+    - name: /content/preload
+      condition:
+        method: GET
+        pathRegex: /content/preload
+      isRetryable: true
+      timeout: 5s
+
+---
+# Traffic Split for Canary Deployments
+apiVersion: split.smi-spec.io/v1alpha4
+kind: TrafficSplit
+metadata:
+  name: session-state-canary
+  namespace: harmonyflow
+spec:
+  service: session-state-service
+  backends:
+    - service: session-state-service
+      weight: 90
+    - service: session-state-service-canary
+      weight: 10

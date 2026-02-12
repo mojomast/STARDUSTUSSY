@@ -1,0 +1,241 @@
+{
+  "rabbit_version": "3.12",
+  "rabbitmq_version": "3.12.0",
+  "product_name": "RabbitMQ",
+  "product_version": "3.12.0",
+  "users": [
+    {
+      "name": "harmonyflow",
+      "password_hash": "changeme_in_production",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": "administrator"
+    },
+    {
+      "name": "harmonyflow_app",
+      "password_hash": "changeme_in_production",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ""
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    },
+    {
+      "name": "harmonyflow"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "harmonyflow",
+      "vhost": "harmonyflow",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "harmonyflow_app",
+      "vhost": "harmonyflow",
+      "configure": "^$",
+      "write": "^(events\\..*|session\\..*|wellness\\..*)$",
+      "read": "^(events\\..*|session\\..*|wellness\\..*)$"
+    }
+  ],
+  "topic_permissions": [],
+  "parameters": [],
+  "global_parameters": [
+    {
+      "name": "cluster_name",
+      "value": "rabbit@harmonyflow"
+    }
+  ],
+  "policies": [],
+  "queues": [
+    {
+      "name": "events.user.registered",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 86400000,
+        "x-max-length": 100000,
+        "x-overflow": "reject-publish"
+      }
+    },
+    {
+      "name": "events.user.login",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 86400000,
+        "x-max-length": 100000
+      }
+    },
+    {
+      "name": "events.user.logout",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 86400000
+      }
+    },
+    {
+      "name": "events.session.created",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 86400000
+      }
+    },
+    {
+      "name": "events.session.destroyed",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 86400000
+      }
+    },
+    {
+      "name": "events.snapshot.created",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 86400000
+      }
+    },
+    {
+      "name": "events.wellness.alert",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 604800000,
+        "x-max-priority": 10
+      }
+    },
+    {
+      "name": "events.audit.log",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-message-ttl": 604800000
+      }
+    },
+    {
+      "name": "dlq.events",
+      "vhost": "harmonyflow",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "events",
+      "vhost": "harmonyflow",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "events.retry",
+      "vhost": "harmonyflow",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "events.dlx",
+      "vhost": "harmonyflow",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.user.registered",
+      "destination_type": "queue",
+      "routing_key": "user.registered",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.user.login",
+      "destination_type": "queue",
+      "routing_key": "user.login",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.user.logout",
+      "destination_type": "queue",
+      "routing_key": "user.logout",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.session.created",
+      "destination_type": "queue",
+      "routing_key": "session.created",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.session.destroyed",
+      "destination_type": "queue",
+      "routing_key": "session.destroyed",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.snapshot.created",
+      "destination_type": "queue",
+      "routing_key": "snapshot.created",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.wellness.alert",
+      "destination_type": "queue",
+      "routing_key": "wellness.alert.#",
+      "arguments": {}
+    },
+    {
+      "source": "events",
+      "vhost": "harmonyflow",
+      "destination": "events.audit.log",
+      "destination_type": "queue",
+      "routing_key": "audit.log",
+      "arguments": {}
+    },
+    {
+      "source": "events.dlx",
+      "vhost": "harmonyflow",
+      "destination": "dlq.events",
+      "destination_type": "queue",
+      "routing_key": "#",
+      "arguments": {}
+    }
+  ]
+}

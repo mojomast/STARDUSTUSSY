@@ -1,0 +1,260 @@
+# Infrastructure Deployment Pipeline
+# Deploys Kubernetes infrastructure components
+
+name: Infrastructure Deployment
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/kubernetes/**'
+      - 'infrastructure/terraform/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-west-2
+  TF_IN_AUTOMATION: true
+
+jobs:
+  # Terraform Plan
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+          terraform_wrapper: false
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Terraform Init
+        working-directory: infrastructure/terraform
+        run: terraform init
+      
+      - name: Terraform Validate
+        working-directory: infrastructure/terraform
+        run: terraform validate
+      
+      - name: Terraform Plan
+        working-directory: infrastructure/terraform
+        run: |
+          terraform plan -var="environment=${{ github.event.inputs.environment || 'dev' }}" -out=tfplan
+      
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-plan
+          path: infrastructure/terraform/tfplan
+
+  # Terraform Apply (Manual Approval Required)
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    environment: 
+      name: ${{ github.event.inputs.environment || 'dev' }}-approval
+      url: https://harmonyflow.io
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v3
+        with:
+          name: terraform-plan
+          path: infrastructure/terraform
+      
+      - name: Terraform Init
+        working-directory: infrastructure/terraform
+        run: terraform init
+      
+      - name: Terraform Apply
+        working-directory: infrastructure/terraform
+        run: terraform apply -auto-approve tfplan
+
+  # Deploy Kubernetes Resources
+  deploy-kubernetes:
+    name: Deploy Kubernetes Resources
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    if: always() && (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped')
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name harmonyflow-${{ github.event.inputs.environment || 'dev' }}
+      
+      - name: Install FluxCD
+        run: |
+          curl -s https://fluxcd.io/install.sh | sudo bash
+      
+      - name: Bootstrap FluxCD
+        run: |
+          flux check --pre || flux install
+      
+      - name: Apply Infrastructure Resources
+        run: |
+          # Apply in order: namespaces → operators → services
+          kubectl apply -f infrastructure/kubernetes/linkerd/
+          kubectl apply -f infrastructure/kubernetes/redis/
+          kubectl apply -f infrastructure/kubernetes/postgresql/
+          kubectl apply -f infrastructure/kubernetes/rabbitmq/
+          kubectl apply -f infrastructure/kubernetes/monitoring/
+          kubectl apply -f infrastructure/kubernetes/vault/
+      
+      - name: Verify Deployments
+        run: |
+          echo "Checking Linkerd..."
+          kubectl rollout status deployment/linkerd-destination -n linkerd --timeout=300s
+          
+          echo "Checking Redis..."
+          kubectl rollout status statefulset/redis-cluster -n redis --timeout=300s
+          
+          echo "Checking PostgreSQL..."
+          kubectl rollout status statefulset/postgresql-primary -n postgresql --timeout=300s
+          kubectl rollout status statefulset/postgresql-replica -n postgresql --timeout=300s
+          
+          echo "Checking RabbitMQ..."
+          kubectl rollout status statefulset/rabbitmq -n rabbitmq --timeout=300s
+          
+          echo "Checking Monitoring..."
+          kubectl rollout status deployment/prometheus-grafana -n monitoring --timeout=300s
+          kubectl rollout status statefulset/alertmanager-prometheus-alertmanager -n monitoring --timeout=300s
+          
+          echo "All infrastructure components are healthy!"
+
+  # Verify Cluster Health
+  health-check:
+    name: Cluster Health Check
+    runs-on: ubuntu-latest
+    needs: deploy-kubernetes
+    if: always() && needs.deploy-kubernetes.result == 'success'
+    
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name harmonyflow-${{ github.event.inputs.environment || 'dev' }}
+      
+      - name: Run Health Checks
+        run: |
+          echo "=== Cluster Nodes ==="
+          kubectl get nodes -o wide
+          
+          echo "=== Pod Status ==="
+          kubectl get pods --all-namespaces
+          
+          echo "=== Services ==="
+          kubectl get svc --all-namespaces
+          
+          echo "=== Ingress ==="
+          kubectl get ingress --all-namespaces
+          
+          echo "=== Resource Usage ==="
+          kubectl top nodes || echo "Metrics server not available yet"
+          kubectl top pods --all-namespaces || echo "Metrics server not available yet"
+          
+          echo "=== Persistent Volumes ==="
+          kubectl get pv
+          kubectl get pvc --all-namespaces
+
+  # Notify on Completion
+  notify:
+    name: Notify Infrastructure Team
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    if: always()
+    
+    steps:
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Infrastructure deployment ${{ needs.health-check.result == 'success' && 'successful' || 'failed' }}!",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🏗️ Infrastructure Deployment ${{ needs.health-check.result == 'success' && 'Complete' || 'Failed' }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ github.event.inputs.environment || 'dev' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:*\n${{ needs.health-check.result == 'success' && '✅ Success' || '❌ Failed' }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

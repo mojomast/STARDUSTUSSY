@@ -1,0 +1,498 @@
+# PostgreSQL Production Cluster Configuration
+# Primary + 2 Replicas with automated backups
+# Multi-AZ deployment with point-in-time recovery
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgresql-production
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: database
+    environment: production
+    criticality: high
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgresql-production-secret
+  namespace: postgresql-production
+type: Opaque
+stringData:
+  password: "CHANGE_ME_IN_VAULT_PRODUCTION"
+  replication-password: "CHANGE_ME_REPLICATION"
+  admin-password: "CHANGE_ME_ADMIN"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-production-config
+  namespace: postgresql-production
+data:
+  postgresql.conf: |
+    # Production PostgreSQL Configuration
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 500
+    shared_buffers = 2GB
+    effective_cache_size = 6GB
+    maintenance_work_mem = 512MB
+    checkpoint_completion_target = 0.9
+    wal_buffers = 16MB
+    default_statistics_target = 100
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    work_mem = 4MB
+    min_wal_size = 1GB
+    max_wal_size = 4GB
+    max_worker_processes = 8
+    max_parallel_workers_per_gather = 4
+    max_parallel_workers = 8
+    max_parallel_maintenance_workers = 4
+    
+    # Write Ahead Logging
+    wal_level = replica
+    wal_log_hints = on
+    max_wal_senders = 10
+    max_replication_slots = 10
+    wal_keep_size = 1GB
+    hot_standby = on
+    hot_standby_feedback = on
+    
+    # Logging
+    logging_collector = on
+    log_directory = '/var/log/postgresql'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_rotation_age = 1d
+    log_rotation_size = 100MB
+    log_min_duration_statement = 1000
+    log_checkpoints = on
+    log_connections = on
+    log_disconnections = on
+    log_lock_waits = on
+    log_temp_files = 0
+    log_autovacuum_min_duration = 0
+    log_error_verbosity = default
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    
+    # Autovacuum
+    autovacuum = on
+    autovacuum_max_workers = 3
+    autovacuum_naptime = 1min
+    autovacuum_vacuum_threshold = 50
+    autovacuum_analyze_threshold = 50
+    autovacuum_vacuum_scale_factor = 0.2
+    autovacuum_analyze_scale_factor = 0.1
+    
+    # Performance
+    shared_preload_libraries = 'pg_stat_statements,auto_explain'
+    pg_stat_statements.track = all
+    pg_stat_statements.max = 10000
+    track_io_timing = on
+    track_functions = all
+    
+  pg_hba.conf: |
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+    local   all             all                                     trust
+    host    all             all             127.0.0.1/32            scram-sha-256
+    host    all             all             ::1/128                 scram-sha-256
+    local   replication     all                                     trust
+    host    replication     all             127.0.0.1/32            scram-sha-256
+    host    replication     all             ::1/128                 scram-sha-256
+    host    replication     replicator      10.0.0.0/8              scram-sha-256
+    host    all             all             10.0.0.0/8              scram-sha-256
+
+---
+# Service for PostgreSQL Primary
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-production-primary
+  namespace: postgresql-production
+  labels:
+    app: postgresql
+    role: primary
+    environment: production
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgresql
+  selector:
+    app: postgresql
+    role: primary
+    environment: production
+
+---
+# Service for PostgreSQL Replicas (read-only)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-production-replicas
+  namespace: postgresql-production
+  labels:
+    app: postgresql
+    role: replica
+    environment: production
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgresql
+  selector:
+    app: postgresql
+    role: replica
+    environment: production
+
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-production
+  namespace: postgresql-production
+  labels:
+    app: postgresql
+    environment: production
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgresql
+  selector:
+    app: postgresql
+    environment: production
+
+---
+# StatefulSet for PostgreSQL Cluster
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql-production
+  namespace: postgresql-production
+  labels:
+    app: postgresql
+    environment: production
+spec:
+  serviceName: postgresql-production
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: postgresql
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: postgresql
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - postgresql
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - postgresql
+                topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values:
+                      - database
+      tolerations:
+        - key: "database"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      initContainers:
+        # Init container to set up replication
+        - name: init-postgresql
+          image: bitnami/postgresql-repmgr:16
+          command:
+            - /bin/bash
+            - -c
+            - |
+              if [[ "$(hostname)" == "postgresql-production-0" ]]; then
+                echo "Initializing primary node..."
+                export REPMGR_PRIMARY_HOST=""
+                export REPMGR_PRIMARY_PORT=""
+                export REPMGR_CONNECT_TIMEOUT=5
+                export REPMGR_RECONNECT_ATTEMPTS=3
+                export REPMGR_RECONNECT_INTERVAL=5
+              else
+                echo "Setting up replica node..."
+                export REPMGR_PRIMARY_HOST=postgresql-production-0.postgresql-production
+                export REPMGR_PRIMARY_PORT=5432
+              fi
+          volumeMounts:
+            - name: postgresql-data
+              mountPath: /bitnami/postgresql
+      containers:
+        - name: postgresql
+          image: bitnami/postgresql-repmgr:16
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5432
+              name: postgresql
+            - containerPort: 6432
+              name: pgpool
+          env:
+            - name: POSTGRESQL_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-production-secret
+                  key: admin-password
+            - name: POSTGRESQL_USERNAME
+              value: "harmonyflow"
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-production-secret
+                  key: password
+            - name: POSTGRESQL_DATABASE
+              value: "harmonyflow"
+            - name: REPMGR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-production-secret
+                  key: replication-password
+            - name: REPMGR_PRIMARY_HOST
+              value: "postgresql-production-0.postgresql-production"
+            - name: REPMGR_PRIMARY_PORT
+              value: "5432"
+            - name: REPMGR_PARTNER_NODES
+              value: "postgresql-production-0.postgresql-production:5432,postgresql-production-1.postgresql-production:5432,postgresql-production-2.postgresql-production:5432"
+            - name: REPMGR_NODE_NAME
+              value: "$(hostname)"
+            - name: REPMGR_NODE_NETWORK_NAME
+              value: "$(hostname).postgresql-production"
+            - name: REPMGR_PORT_NUMBER
+              value: "5432"
+            - name: REPMGR_CONNECT_TIMEOUT
+              value: "5"
+            - name: REPMGR_RECONNECT_ATTEMPTS
+              value: "3"
+            - name: REPMGR_RECONNECT_INTERVAL
+              value: "5"
+            - name: REPMGR_PRIMARY_VISIBILITY_CONSENSUS
+              value: "true"
+            - name: REPMGR_FAILOVER
+              value: "automatic"
+          volumeMounts:
+            - name: postgresql-data
+              mountPath: /bitnami/postgresql
+            - name: postgresql-config
+              mountPath: /bitnami/postgresql/conf
+            - name: postgresql-logs
+              mountPath: /var/log/postgresql
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 4Gi
+            limits:
+              cpu: 2000m
+              memory: 8Gi
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+                - -d
+                - harmonyflow
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+                - -d
+                - harmonyflow
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+        
+        # PostgreSQL Exporter for Prometheus
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9187
+              name: metrics
+          env:
+            - name: DATA_SOURCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-production-secret
+                  key: password
+            - name: PG_EXPORTER_EXTEND_QUERY_PATH
+              value: /queries/queries.yaml
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: postgresql-config
+          configMap:
+            name: postgresql-production-config
+        - name: postgresql-logs
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: postgresql-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 500Gi
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgresql-production-metrics
+  namespace: postgresql-production
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - postgresql-production
+  selector:
+    matchLabels:
+      app: postgresql
+      environment: production
+  endpoints:
+    - port: metrics
+      interval: 15s
+      scrapeTimeout: 10s
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgresql-production-pdb
+  namespace: postgresql-production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: postgresql
+      environment: production
+
+---
+# Network Policy - Deny all by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql-production-default-deny
+  namespace: postgresql-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Network Policy - Allow specific traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql-production-allow
+  namespace: postgresql-production
+spec:
+  podSelector:
+    matchLabels:
+      app: postgresql
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow-production
+      ports:
+        - protocol: TCP
+          port: 5432
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9187
+    - from:
+        - podSelector:
+            matchLabels:
+              app: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432

@@ -1,0 +1,186 @@
+.promptOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.prompt {
+  background: white;
+  border-radius: 1rem;
+  padding: 2rem;
+  max-width: 480px;
+  width: 100%;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.promptIcon {
+  font-size: 3rem;
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.promptTitle {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1f2937;
+  text-align: center;
+  margin: 0 0 0.5rem 0;
+}
+
+.promptText {
+  color: #6b7280;
+  text-align: center;
+  margin: 0 0 1.5rem 0;
+  font-size: 0.875rem;
+}
+
+.sessionPreview {
+  background: #f9fafb;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.previewHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.previewDeviceIcon {
+  font-size: 1.5rem;
+}
+
+.previewDeviceInfo {
+  flex: 1;
+}
+
+.previewDeviceName {
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.previewDeviceMeta {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin: 0.25rem 0 0 0;
+}
+
+.previewState {
+  background: white;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid #e5e7eb;
+}
+
+.previewStateLabel {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: #6b7280;
+  font-weight: 600;
+  margin: 0 0 0.5rem 0;
+}
+
+.previewStateContent {
+  font-size: 0.75rem;
+  color: #374151;
+  font-family: monospace;
+  max-height: 100px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.previewStats {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+.previewStat {
+  display: flex;
+  flex-direction: column;
+}
+
+.previewStatValue {
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 0.875rem;
+}
+
+.previewStatLabel {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.promptActions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.promptButton {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.promptButton.primary {
+  background: #3b82f6;
+  color: white;
+}
+
+.promptButton.primary:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.promptButton.secondary {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.promptButton.secondary:hover {
+  background: #e5e7eb;
+}
+
+.promptButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .promptActions {
+    flex-direction: column;
+  }
+}

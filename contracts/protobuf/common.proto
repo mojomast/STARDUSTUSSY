@@ -1,0 +1,231 @@
+syntax = "proto3";
+
+package harmonyflow.common.v1;
+
+option go_package = "github.com/harmonyflow/syncbridge/proto/common";
+option java_package = "io.harmonyflow.proto.common";
+option java_multiple_files = true;
+option csharp_namespace = "HarmonyFlow.Proto.Common";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// Empty message for services that don't require request/response data
+message Empty {}
+
+// Pagination parameters for list operations
+message Pagination {
+  int32 limit = 1;
+  int32 offset = 2;
+  string cursor = 3;
+}
+
+// PaginatedResponse provides standard pagination metadata
+message PaginatedResponse {
+  int32 total = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  string next_cursor = 4;
+  bool has_more = 5;
+}
+
+// Error details for structured error responses
+message Error {
+  string code = 1;
+  string message = 2;
+  google.protobuf.Struct details = 3;
+  string request_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+// APIResponse wrapper for consistent API responses
+message APIResponse {
+  bool success = 1;
+  oneof result {
+    google.protobuf.Struct data = 2;
+    Error error = 3;
+  }
+  string request_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+}
+
+// Health status for service health checks
+message HealthStatus {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_HEALTHY = 1;
+    STATUS_UNHEALTHY = 2;
+    STATUS_DEGRADED = 3;
+  }
+  
+  Status status = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string version = 3;
+  map<string, ServiceHealth> services = 4;
+  google.protobuf.Duration uptime = 5;
+}
+
+// ServiceHealth represents individual service health
+message ServiceHealth {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_CONNECTED = 1;
+    STATUS_DISCONNECTED = 2;
+    STATUS_UNKNOWN = 3;
+  }
+  
+  Status status = 1;
+  string message = 2;
+  google.protobuf.Duration latency = 3;
+  google.protobuf.Timestamp last_check = 4;
+}
+
+// Metadata for tracking request context
+message RequestMetadata {
+  string request_id = 1;
+  string user_id = 2;
+  string device_id = 3;
+  string client_version = 4;
+  string platform = 5;
+  google.protobuf.Timestamp request_time = 6;
+}
+
+// TimeRange for filtering by time
+message TimeRange {
+  google.protobuf.Timestamp start = 1;
+  google.protobuf.Timestamp end = 2;
+}
+
+// SortOrder defines sorting direction
+enum SortOrder {
+  SORT_ORDER_UNSPECIFIED = 0;
+  SORT_ORDER_ASC = 1;
+  SORT_ORDER_DESC = 2;
+}
+
+// SortField defines a field to sort by
+message SortField {
+  string field = 1;
+  SortOrder order = 2;
+}
+
+// Filter operator for complex queries
+enum FilterOperator {
+  FILTER_OPERATOR_UNSPECIFIED = 0;
+  FILTER_OPERATOR_EQ = 1;
+  FILTER_OPERATOR_NE = 2;
+  FILTER_OPERATOR_GT = 3;
+  FILTER_OPERATOR_GTE = 4;
+  FILTER_OPERATOR_LT = 5;
+  FILTER_OPERATOR_LTE = 6;
+  FILTER_OPERATOR_IN = 7;
+  FILTER_OPERATOR_NIN = 8;
+  FILTER_OPERATOR_CONTAINS = 9;
+  FILTER_OPERATOR_STARTS_WITH = 10;
+  FILTER_OPERATOR_ENDS_WITH = 11;
+  FILTER_OPERATOR_EXISTS = 12;
+}
+
+// Filter condition for querying
+message Filter {
+  string field = 1;
+  FilterOperator operator = 2;
+  google.protobuf.Value value = 3;
+}
+
+// FilterGroup for combining multiple filters
+message FilterGroup {
+  enum Operator {
+    OPERATOR_UNSPECIFIED = 0;
+    OPERATOR_AND = 1;
+    OPERATOR_OR = 2;
+  }
+  
+  Operator operator = 1;
+  repeated Filter filters = 2;
+  repeated FilterGroup groups = 3;
+}
+
+// Token metadata for authentication
+message TokenMetadata {
+  string token_id = 1;
+  string user_id = 2;
+  repeated string scopes = 3;
+  google.protobuf.Timestamp issued_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  string issuer = 6;
+  string audience = 7;
+}
+
+// Rate limit information
+message RateLimit {
+  int32 limit = 1;
+  int32 remaining = 2;
+  google.protobuf.Timestamp reset_time = 3;
+  string window = 4;
+}
+
+// Version information
+message Version {
+  string version = 1;
+  string commit = 2;
+  string branch = 3;
+  google.protobuf.Timestamp build_time = 4;
+  string go_version = 5;
+}
+
+// User identifier
+message User {
+  string id = 1;
+  string email = 2;
+  string display_name = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+  UserStatus status = 6;
+}
+
+// User status
+enum UserStatus {
+  USER_STATUS_UNSPECIFIED = 0;
+  USER_STATUS_ACTIVE = 1;
+  USER_STATUS_INACTIVE = 2;
+  USER_STATUS_SUSPENDED = 3;
+  USER_STATUS_DELETED = 4;
+}
+
+// Address for location data
+message Address {
+  string street = 1;
+  string city = 2;
+  string state = 3;
+  string postal_code = 4;
+  string country = 5;
+  double latitude = 6;
+  double longitude = 7;
+}
+
+// Money type for financial data
+message Money {
+  string currency_code = 1;
+  int64 units = 2;
+  int32 nanos = 3;
+}
+
+// Duration range
+message DurationRange {
+  google.protobuf.Duration min = 1;
+  google.protobuf.Duration max = 2;
+}
+
+// Audit log entry
+message AuditLog {
+  string id = 1;
+  string user_id = 2;
+  string action = 3;
+  string resource_type = 4;
+  string resource_id = 5;
+  google.protobuf.Struct changes = 6;
+  google.protobuf.Timestamp created_at = 7;
+  string ip_address = 8;
+  string user_agent = 9;
+}

@@ -1,0 +1,335 @@
+# Redis Cluster Configuration for HarmonyFlow
+# Version: Redis 7.0+
+# Purpose: Session state storage, caching (7-day TTL)
+
+---
+# Namespace for Redis
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: database
+
+---
+# ConfigMap for Redis configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis
+data:
+  redis.conf: |
+    # Redis Cluster Configuration
+    port 6379
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    appendonly yes
+    appendfsync everysec
+    
+    # Memory Management
+    maxmemory 2gb
+    maxmemory-policy allkeys-lru
+    
+    # Persistence
+    save 900 1
+    save 300 10
+    save 60 10000
+    
+    # Security
+    protected-mode no
+    requirepass ${REDIS_PASSWORD}
+    masterauth ${REDIS_PASSWORD}
+    
+    # Performance
+    tcp-keepalive 300
+    timeout 0
+    
+    # Logging
+    loglevel notice
+    
+    # Disable dangerous commands in production
+    rename-command FLUSHDB ""
+    rename-command FLUSHALL ""
+
+---
+# Headless Service for Redis Cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster
+  namespace: redis
+  labels:
+    app: redis
+    tier: database
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+    - port: 16379
+      targetPort: 16379
+      name: gossip
+  selector:
+    app: redis
+    tier: database
+
+---
+# StatefulSet for Redis Cluster (6 nodes: 3 masters + 3 replicas)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-cluster
+  namespace: redis
+  labels:
+    app: redis
+    tier: database
+spec:
+  serviceName: redis-cluster
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis
+      tier: database
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: database
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - redis
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: redis
+          image: redis:7.0-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 16379
+              name: gossip
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: password
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+        
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.54.0
+          ports:
+            - containerPort: 9121
+              name: metrics
+          env:
+            - name: REDIS_ADDR
+              value: "redis://localhost:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+# Job to initialize Redis Cluster
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cluster-init
+  namespace: redis
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      containers:
+        - name: redis-init
+          image: redis:7.0-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              sleep 30
+              redis-cli --cluster create \
+                redis-cluster-0.redis-cluster.redis.svc.cluster.local:6379 \
+                redis-cluster-1.redis-cluster.redis.svc.cluster.local:6379 \
+                redis-cluster-2.redis-cluster.redis.svc.cluster.local:6379 \
+                redis-cluster-3.redis-cluster.redis.svc.cluster.local:6379 \
+                redis-cluster-4.redis-cluster.redis.svc.cluster.local:6379 \
+                redis-cluster-5.redis-cluster.redis.svc.cluster.local:6379 \
+                --cluster-replicas 1 \
+                --cluster-yes
+      restartPolicy: OnFailure
+
+---
+# Secret for Redis authentication
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: redis
+type: Opaque
+stringData:
+  password: "CHANGE_ME_IN_PRODUCTION"  # Will be managed by Vault
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-metrics
+  namespace: redis
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: redis
+      tier: database
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: redis
+spec:
+  minAvailable: 4
+  selector:
+    matchLabels:
+      app: redis
+      tier: database
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: redis-hpa
+  namespace: redis
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: redis-cluster
+  minReplicas: 6
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-network-policy
+  namespace: redis
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 16379
+        - protocol: TCP
+          port: 9121

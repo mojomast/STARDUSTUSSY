@@ -1,0 +1,298 @@
+# Alertmanager Configuration for Production
+# PagerDuty integration for critical alerts
+# Email notifications for warnings
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-production-secret
+  namespace: monitoring
+type: Opaque
+stringData:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'alerts@harmonyflow.io'
+      smtp_auth_username: 'alerts@harmonyflow.io'
+      smtp_auth_password: 'CHANGE_ME_SMTP_PASSWORD'
+      smtp_require_tls: true
+      pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+      
+      # Slack configuration
+      slack_api_url: 'https://hooks.slack.com/services/CHANGE_ME/CHANGE_ME/CHANGE_ME'
+    
+    templates:
+      - '/etc/alertmanager/templates/*.tmpl'
+    
+    route:
+      # Root route
+      receiver: 'default'
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 12h
+      
+      routes:
+        # Critical alerts -> PagerDuty immediately
+        - match:
+            severity: critical
+          receiver: 'pagerduty-critical'
+          continue: true
+          group_wait: 0s
+        
+        # Database critical alerts -> PagerDuty + specific routing
+        - match_re:
+            severity: critical
+            service: redis|postgresql|rabbitmq
+          receiver: 'pagerduty-database'
+          continue: true
+          group_wait: 0s
+        
+        # SLO violation alerts -> PagerDuty
+        - match:
+            slo: availability
+          receiver: 'pagerduty-slo'
+          continue: true
+          group_wait: 30s
+        
+        # Warning alerts -> Slack + Email
+        - match:
+            severity: warning
+          receiver: 'slack-warnings'
+          continue: false
+        
+        # Info alerts -> Slack only
+        - match:
+            severity: info
+          receiver: 'slack-info'
+          continue: false
+        
+        # Backup alerts -> specific routing
+        - match_re:
+            alertname: Backup.*
+          receiver: 'slack-backup'
+          continue: false
+    
+    inhibit_rules:
+      # Inhibit warning if critical is firing
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname', 'cluster', 'service']
+      
+      # Inhibit info if warning is firing
+      - source_match:
+          severity: 'warning'
+        target_match:
+          severity: 'info'
+        equal: ['alertname', 'cluster', 'service']
+    
+    receivers:
+      - name: 'default'
+        slack_configs:
+          - channel: '#alerts'
+            title: '{{ template "slack.default.title" . }}'
+            text: '{{ template "slack.default.text" . }}'
+            send_resolved: true
+      
+      - name: 'pagerduty-critical'
+        pagerduty_configs:
+          - service_key: 'CHANGE_ME_PAGERDUTY_INTEGRATION_KEY'
+            severity: critical
+            description: '{{ template "pagerduty.default.description" . }}'
+            details:
+              firing: '{{ template "pagerduty.default.instances" .Alerts.Firing }}'
+              resolved: '{{ template "pagerduty.default.instances" .Alerts.Resolved }}'
+              num_firing: '{{ .Alerts.Firing | len }}'
+              num_resolved: '{{ .Alerts.Resolved | len }}'
+              runbook_url: '{{ .CommonAnnotations.runbook_url }}'
+            send_resolved: true
+      
+      - name: 'pagerduty-database'
+        pagerduty_configs:
+          - service_key: 'CHANGE_ME_PAGERDUTY_DATABASE_KEY'
+            severity: critical
+            description: 'DATABASE ALERT: {{ .GroupLabels.alertname }}'
+            details:
+              firing: '{{ template "pagerduty.default.instances" .Alerts.Firing }}'
+              service: '{{ .CommonLabels.service }}'
+              runbook_url: '{{ .CommonAnnotations.runbook_url }}'
+            send_resolved: true
+      
+      - name: 'pagerduty-slo'
+        pagerduty_configs:
+          - service_key: 'CHANGE_ME_PAGERDUTY_SLO_KEY'
+            severity: critical
+            description: 'SLO VIOLATION: {{ .GroupLabels.alertname }}'
+            details:
+              firing: '{{ template "pagerduty.default.instances" .Alerts.Firing }}'
+              slo: '{{ .CommonLabels.slo }}'
+            send_resolved: true
+      
+      - name: 'slack-warnings'
+        slack_configs:
+          - channel: '#alerts-warnings'
+            title: '⚠️ Warning: {{ .GroupLabels.alertname }}'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              *Service:* {{ .Labels.service }}
+              *Instance:* {{ .Labels.instance }}
+              {{ end }}
+            color: 'warning'
+            send_resolved: true
+      
+      - name: 'slack-info'
+        slack_configs:
+          - channel: '#alerts-info'
+            title: 'ℹ️ Info: {{ .GroupLabels.alertname }}'
+            text: '{{ .CommonAnnotations.summary }}'
+            color: '#439FE0'
+            send_resolved: true
+      
+      - name: 'slack-backup'
+        slack_configs:
+          - channel: '#alerts-backup'
+            title: '💾 Backup Alert: {{ .GroupLabels.alertname }}'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              {{ end }}
+            color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+            send_resolved: true
+      
+      - name: 'email-oncall'
+        email_configs:
+          - to: 'oncall@harmonyflow.io'
+            subject: '[HarmonyFlow Production] {{ .GroupLabels.alertname }}'
+            body: |
+              {{ range .Alerts }}
+              Alert: {{ .Annotations.summary }}
+              Description: {{ .Annotations.description }}
+              Severity: {{ .Labels.severity }}
+              Started: {{ .StartsAt }}
+              {{ end }}
+            send_resolved: true
+
+---
+# Alertmanager Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - alertmanager
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.26.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - '--config.file=/etc/alertmanager/alertmanager.yml'
+            - '--storage.path=/alertmanager'
+            - '--web.route-prefix=/'
+            - '--cluster.advertise-address=$(POD_IP):9094'
+            - '--cluster.listen-address=0.0.0.0:9094'
+            - '--cluster.peer=alertmanager-0.alertmanager:9094'
+            - '--cluster.peer=alertmanager-1.alertmanager:9094'
+          ports:
+            - containerPort: 9093
+              name: web
+            - containerPort: 9094
+              name: cluster
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+            - name: storage
+              mountPath: /alertmanager
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 200m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: web
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: web
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          secret:
+            secretName: alertmanager-production-secret
+        - name: storage
+          emptyDir: {}
+
+---
+# Alertmanager Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9093
+      targetPort: 9093
+      name: web
+    - port: 9094
+      targetPort: 9094
+      name: cluster
+  selector:
+    app: alertmanager
+  clusterIP: None
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: alertmanager-pdb
+  namespace: monitoring
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: alertmanager

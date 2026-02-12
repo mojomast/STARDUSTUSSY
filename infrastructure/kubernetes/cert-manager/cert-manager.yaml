@@ -1,0 +1,300 @@
+# Cert-Manager Configuration for TLS Certificate Management
+# Automatic Let's Encrypt certificate provisioning and renewal
+
+---
+# Cert-Manager HelmRelease
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: cert-manager
+      version: "v1.13.0"
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: flux-system
+  values:
+    installCRDs: true
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 100m
+        memory: 256Mi
+    extraArgs:
+      - --enable-certificate-owner-ref=true
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    webhook:
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+    cainjector:
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi
+
+---
+# Namespace for Cert-Manager
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/component: certificate-management
+
+---
+# Let's Encrypt Staging Issuer (for testing)
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: devops@harmonyflow.io
+    privateKeySecretRef:
+      name: letsencrypt-staging
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+        selector: {}
+
+---
+# Let's Encrypt Production Issuer
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: devops@harmonyflow.io
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+        selector: {}
+
+---
+# Self-Signed Issuer for internal certificates
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+
+---
+# CA Certificate for internal services
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harmonyflow-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: harmonyflow-ca
+  secretName: harmonyflow-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# Internal CA Issuer
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: harmonyflow-internal-ca
+spec:
+  ca:
+    secretName: harmonyflow-ca-secret
+
+---
+# Certificate for Vault
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: vault
+spec:
+  secretName: vault-server-tls
+  issuerRef:
+    name: harmonyflow-internal-ca
+    kind: ClusterIssuer
+  commonName: vault
+  dnsNames:
+    - vault
+    - vault.vault
+    - vault.vault.svc
+    - vault.vault.svc.cluster.local
+    - vault.harmonyflow.io
+    - '*.vault-internal'
+  usages:
+    - server auth
+    - client auth
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+
+---
+# Certificate for Grafana
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grafana-tls
+  namespace: monitoring
+spec:
+  secretName: grafana-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: grafana.harmonyflow.io
+  dnsNames:
+    - grafana.harmonyflow.io
+  usages:
+    - server auth
+
+---
+# Certificate for Prometheus
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: prometheus-tls
+  namespace: monitoring
+spec:
+  secretName: prometheus-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: prometheus.harmonyflow.io
+  dnsNames:
+    - prometheus.harmonyflow.io
+  usages:
+    - server auth
+
+---
+# Certificate for RabbitMQ Management
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rabbitmq-tls
+  namespace: rabbitmq
+spec:
+  secretName: rabbitmq-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: rabbitmq.harmonyflow.io
+  dnsNames:
+    - rabbitmq.harmonyflow.io
+  usages:
+    - server auth
+
+---
+# Certificate for Application Ingress
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harmonyflow-app-tls
+  namespace: harmonyflow
+spec:
+  secretName: harmonyflow-app-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: harmonyflow.io
+  dnsNames:
+    - harmonyflow.io
+    - '*.harmonyflow.io'
+    - api.harmonyflow.io
+    - app.harmonyflow.io
+    - www.harmonyflow.io
+  usages:
+    - server auth
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days before expiry
+
+---
+# Certificate Renewal Monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cert-manager-alerts
+  namespace: cert-manager
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: cert-manager
+      rules:
+        - alert: CertificateExpiringSoon
+          expr: |
+            certmanager_certificate_expiration_timestamp_seconds - time() < 86400 * 30
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "TLS certificate expiring soon"
+            description: "Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} expires in less than 30 days"
+            
+        - alert: CertificateExpired
+          expr: |
+            certmanager_certificate_expiration_timestamp_seconds - time() < 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "TLS certificate has expired"
+            description: "Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} has expired"
+            
+        - alert: CertificateNotReady
+          expr: |
+            certmanager_certificate_ready_status{condition="False"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate is not ready"
+            description: "Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} is not ready"
+            
+        - alert: CertManagerNotRunning
+          expr: |
+            up{job="cert-manager"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Cert-Manager is not running"
+            description: "Cert-Manager pod is not running in namespace cert-manager"

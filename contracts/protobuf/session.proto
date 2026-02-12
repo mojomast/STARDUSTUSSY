@@ -1,0 +1,282 @@
+syntax = "proto3";
+
+package harmonyflow.session.v1;
+
+option go_package = "github.com/harmonyflow/syncbridge/proto/session";
+option java_package = "io.harmonyflow.proto.session";
+option java_multiple_files = true;
+option csharp_namespace = "HarmonyFlow.Proto.Session";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Session represents a wellness session
+message Session {
+  string id = 1;
+  string user_id = 2;
+  string name = 3;
+  SessionType type = 4;
+  SessionStatus status = 5;
+  SessionSettings settings = 6;
+  SessionState state = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp completed_at = 10;
+  int64 version = 11;
+}
+
+// SessionType defines the type of wellness session
+enum SessionType {
+  SESSION_TYPE_UNSPECIFIED = 0;
+  SESSION_TYPE_MEDITATION = 1;
+  SESSION_TYPE_BREATHING = 2;
+  SESSION_TYPE_YOGA = 3;
+  SESSION_TYPE_MINDFULNESS = 4;
+  SESSION_TYPE_CUSTOM = 5;
+}
+
+// SessionStatus represents the current state of a session
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  SESSION_STATUS_ACTIVE = 1;
+  SESSION_STATUS_PAUSED = 2;
+  SESSION_STATUS_COMPLETED = 3;
+  SESSION_STATUS_ARCHIVED = 4;
+}
+
+// SessionSettings contains configurable session parameters
+message SessionSettings {
+  int32 duration = 1;
+  bool audio_enabled = 2;
+  bool haptic_enabled = 3;
+  bool auto_save = 4;
+  google.protobuf.Struct custom_properties = 5;
+}
+
+// SessionState represents the mutable state of a session
+message SessionState {
+  int64 version = 1;
+  google.protobuf.Timestamp last_modified = 2;
+  string modified_by = 3;
+  google.protobuf.Struct data = 4;
+  string checksum = 5;
+}
+
+// StateDelta represents incremental changes to session state
+message StateDelta {
+  int64 base_version = 1;
+  repeated DeltaOperation operations = 2;
+  string checksum = 3;
+}
+
+// DeltaOperation represents a single state change operation
+message DeltaOperation {
+  enum OperationType {
+    OPERATION_TYPE_UNSPECIFIED = 0;
+    OPERATION_TYPE_ADD = 1;
+    OPERATION_TYPE_REMOVE = 2;
+    OPERATION_TYPE_REPLACE = 3;
+    OPERATION_TYPE_MOVE = 4;
+    OPERATION_TYPE_COPY = 5;
+    OPERATION_TYPE_TEST = 6;
+  }
+  
+  OperationType op = 1;
+  string path = 2;
+  google.protobuf.Value value = 3;
+  string from = 4;
+}
+
+// Snapshot represents a point-in-time backup of session state
+message Snapshot {
+  string id = 1;
+  string session_id = 2;
+  int64 version = 3;
+  string label = 4;
+  SessionState state = 5;
+  google.protobuf.Timestamp created_at = 6;
+  string created_by = 7;
+}
+
+// Device represents a client device connected to a session
+message Device {
+  string id = 1;
+  DeviceType type = 2;
+  string name = 3;
+  string user_agent = 4;
+  google.protobuf.Timestamp connected_at = 5;
+  google.protobuf.Timestamp last_seen = 6;
+  repeated string capabilities = 7;
+  ConnectionStatus connection_status = 8;
+}
+
+// DeviceType defines the category of client device
+enum DeviceType {
+  DEVICE_TYPE_UNSPECIFIED = 0;
+  DEVICE_TYPE_WEB = 1;
+  DEVICE_TYPE_IOS = 2;
+  DEVICE_TYPE_ANDROID = 3;
+  DEVICE_TYPE_WEARABLE = 4;
+  DEVICE_TYPE_DESKTOP = 5;
+}
+
+// ConnectionStatus represents the current connection state
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_CONNECTED = 1;
+  CONNECTION_STATUS_DISCONNECTED = 2;
+  CONNECTION_STATUS_RECONNECTING = 3;
+  CONNECTION_STATUS_ERROR = 4;
+}
+
+// SessionListRequest for listing user sessions
+message SessionListRequest {
+  string user_id = 1;
+  SessionStatus status = 2;
+  string type = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+// SessionListResponse contains paginated session results
+message SessionListResponse {
+  repeated Session sessions = 1;
+  int32 total = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+// CreateSessionRequest for creating new sessions
+message CreateSessionRequest {
+  string user_id = 1;
+  string name = 2;
+  SessionType type = 3;
+  SessionSettings settings = 4;
+}
+
+// UpdateSessionRequest for modifying sessions
+message UpdateSessionRequest {
+  string session_id = 1;
+  string name = 2;
+  SessionStatus status = 3;
+  SessionSettings settings = 4;
+  int64 expected_version = 5;
+}
+
+// GetStateRequest for retrieving session state
+message GetStateRequest {
+  string session_id = 1;
+}
+
+// GetStateResponse contains session state
+message GetStateResponse {
+  SessionState state = 1;
+}
+
+// ApplyDeltaRequest for applying state changes
+message ApplyDeltaRequest {
+  string session_id = 1;
+  StateDelta delta = 2;
+  string device_id = 3;
+}
+
+// ApplyDeltaResponse confirms delta application
+message ApplyDeltaResponse {
+  SessionState state = 1;
+  bool conflict_detected = 2;
+}
+
+// SyncRequest for requesting state synchronization
+message SyncRequest {
+  string session_id = 1;
+  int64 from_version = 2;
+  string device_id = 3;
+}
+
+// SyncResponse contains sync data
+message SyncResponse {
+  oneof sync_data {
+    SessionState full_state = 1;
+    StateDelta delta = 2;
+  }
+  int64 current_version = 3;
+}
+
+// WebSocketMessage envelope for real-time communication
+message WebSocketMessage {
+  string id = 1;
+  MessageType type = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  google.protobuf.Struct payload = 4;
+}
+
+// MessageType defines WebSocket message types
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  // Client -> Server
+  MESSAGE_TYPE_SUBSCRIBE = 1;
+  MESSAGE_TYPE_UNSUBSCRIBE = 2;
+  MESSAGE_TYPE_HEARTBEAT = 3;
+  MESSAGE_TYPE_STATE_UPDATE = 4;
+  MESSAGE_TYPE_ACK = 5;
+  // Server -> Client
+  MESSAGE_TYPE_CONNECTED = 6;
+  MESSAGE_TYPE_STATE_SYNC = 7;
+  MESSAGE_TYPE_STATE_DELTA = 8;
+  MESSAGE_TYPE_DEVICE_JOINED = 9;
+  MESSAGE_TYPE_DEVICE_LEFT = 10;
+  MESSAGE_TYPE_ERROR = 11;
+  MESSAGE_TYPE_PING = 12;
+}
+
+// SessionService provides RPC methods for session management
+service SessionService {
+  // Create a new session
+  rpc CreateSession(CreateSessionRequest) returns (Session);
+  
+  // Get session by ID
+  rpc GetSession(GetSessionRequest) returns (Session);
+  
+  // List user sessions
+  rpc ListSessions(SessionListRequest) returns (SessionListResponse);
+  
+  // Update session
+  rpc UpdateSession(UpdateSessionRequest) returns (Session);
+  
+  // Delete session
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+  
+  // Get session state
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
+  
+  // Apply state delta
+  rpc ApplyDelta(ApplyDeltaRequest) returns (ApplyDeltaResponse);
+  
+  // Sync session state
+  rpc Sync(SyncRequest) returns (SyncResponse);
+  
+  // Bidirectional streaming for real-time updates
+  rpc StreamUpdates(StreamUpdatesRequest) returns (stream WebSocketMessage);
+}
+
+// GetSessionRequest for retrieving a session
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+// DeleteSessionRequest for removing a session
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+
+// DeleteSessionResponse confirms deletion
+message DeleteSessionResponse {
+  bool success = 1;
+}
+
+// StreamUpdatesRequest initiates the update stream
+message StreamUpdatesRequest {
+  string session_id = 1;
+  string device_id = 2;
+  int64 last_known_version = 3;
+}

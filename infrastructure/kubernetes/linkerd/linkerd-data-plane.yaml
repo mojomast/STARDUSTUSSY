@@ -1,0 +1,42 @@
+# Linkerd Data Plane Configuration
+# Automatic proxy injection for HarmonyFlow namespaces
+
+---
+# Enable automatic proxy injection for default namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harmonyflow
+  labels:
+    app.kubernetes.io/name: harmonyflow
+    app.kubernetes.io/part-of: syncbridge
+  annotations:
+    linkerd.io/inject: enabled
+
+---
+# Pod Disruption Budget for Linkerd proxy
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: linkerd-proxy-pdb
+  namespace: linkerd
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      linkerd.io/control-plane-component: proxy-injector
+
+---
+# Resource Quota for Linkerd Control Plane
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: linkerd-quota
+  namespace: linkerd
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "20"

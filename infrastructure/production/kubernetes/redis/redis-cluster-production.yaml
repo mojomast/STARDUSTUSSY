@@ -1,0 +1,527 @@
+# Redis Production Cluster Configuration
+# 6+ nodes for high availability across 3 AZs
+# Memory optimized instances with persistence
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-production
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: database
+    environment: production
+    criticality: high
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-production-config
+  namespace: redis-production
+data:
+  redis.conf: |
+    # Production Redis Cluster Configuration
+    port 6379
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    cluster-require-full-coverage no
+    cluster-migration-barrier 1
+    
+    # Persistence - AOF for durability
+    appendonly yes
+    appendfsync everysec
+    appendfilename "appendonly.aof"
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    
+    # RDB snapshots for point-in-time recovery
+    save 900 1
+    save 300 10
+    save 60 10000
+    
+    # Memory Management - Production sizing
+    maxmemory 8gb
+    maxmemory-policy allkeys-lru
+    
+    # Security
+    protected-mode no
+    requirepass ${REDIS_PASSWORD}
+    masterauth ${REDIS_PASSWORD}
+    
+    # Performance tuning
+    tcp-keepalive 300
+    timeout 0
+    tcp-backlog 511
+    
+    # Slow log for performance monitoring
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+    
+    # Disable dangerous commands in production
+    rename-command FLUSHDB ""
+    rename-command FLUSHALL ""
+    rename-command DEBUG ""
+    rename-command CONFIG "CONFIG_a1b2c3d4"
+    
+    # Client output buffer limits
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 256mb 64mb 60
+    client-output-buffer-limit pubsub 32mb 8mb 60
+    
+    # Replication settings
+    repl-diskless-sync yes
+    repl-diskless-sync-delay 5
+    repl-disable-tcp-nodelay no
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-production-secret
+  namespace: redis-production
+type: Opaque
+stringData:
+  password: "CHANGE_ME_IN_VAULT_PRODUCTION"  # Managed by Vault/External Secrets Operator
+
+---
+# Headless Service for Redis Cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-production-cluster
+  namespace: redis-production
+  labels:
+    app: redis
+    tier: database
+    environment: production
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+      protocol: TCP
+    - port: 16379
+      targetPort: 16379
+      name: gossip
+      protocol: TCP
+  selector:
+    app: redis
+    tier: database
+    environment: production
+
+---
+# StatefulSet for Redis Cluster (9 nodes: 3 masters + 6 replicas for HA)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-production-cluster
+  namespace: redis-production
+  labels:
+    app: redis
+    tier: database
+    environment: production
+spec:
+  serviceName: redis-production-cluster
+  replicas: 9
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: redis
+      tier: database
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: database
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        # Spread across nodes and AZs
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - redis
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - redis
+                topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values:
+                      - database
+      tolerations:
+        - key: "database"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 6379
+              name: redis
+              protocol: TCP
+            - containerPort: 16379
+              name: gossip
+              protocol: TCP
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-production-secret
+                  key: password
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 8Gi
+            limits:
+              cpu: 2000m
+              memory: 10Gi
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+            successThreshold: 1
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          startupProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+        
+        # Redis Exporter for Prometheus metrics
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.54.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9121
+              name: metrics
+              protocol: TCP
+          env:
+            - name: REDIS_ADDR
+              value: "redis://localhost:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-production-secret
+                  key: password
+            - name: REDIS_EXPORTER_CHECK_KEYS
+              value: "db0=*"
+            - name: REDIS_EXPORTER_CHECK_STREAMS
+              value: "stream1,stream2"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9121
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-production-config
+            items:
+              - key: redis.conf
+                path: redis.conf
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 100Gi
+
+---
+# Job to initialize Redis Cluster (3 masters + 6 replicas)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-production-cluster-init
+  namespace: redis-production
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+spec:
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: redis-init
+          image: redis:7.2-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Redis nodes to be ready..."
+              sleep 60
+              
+              # Check if cluster already exists
+              if redis-cli -h redis-production-cluster-0.redis-production-cluster.redis-production.svc.cluster.local -a ${REDIS_PASSWORD} cluster info 2>/dev/null | grep -q "cluster_state:ok"; then
+                echo "Cluster already initialized, skipping..."
+                exit 0
+              fi
+              
+              echo "Creating Redis cluster with 3 masters and 6 replicas..."
+              redis-cli --cluster create \
+                redis-production-cluster-0.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-1.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-2.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-3.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-4.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-5.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-6.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-7.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                redis-production-cluster-8.redis-production-cluster.redis-production.svc.cluster.local:6379 \
+                --cluster-replicas 2 \
+                --cluster-yes
+              
+              echo "Redis cluster initialization complete!"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-production-secret
+                  key: password
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-production-metrics
+  namespace: redis-production
+  labels:
+    release: prometheus
+    app: redis-metrics
+spec:
+  namespaceSelector:
+    matchNames:
+      - redis-production
+  selector:
+    matchLabels:
+      app: redis
+      tier: database
+      environment: production
+  endpoints:
+    - port: metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      path: /metrics
+
+---
+# Pod Disruption Budget - Ensure high availability during disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-production-pdb
+  namespace: redis-production
+spec:
+  minAvailable: 6
+  selector:
+    matchLabels:
+      app: redis
+      tier: database
+      environment: production
+
+---
+# Horizontal Pod Autoscaler - Limited for stateful databases
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: redis-production-hpa
+  namespace: redis-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: redis-production-cluster
+  minReplicas: 9
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+
+---
+# Network Policy - Deny all by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-production-default-deny
+  namespace: redis-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Network Policy - Allow specific traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-production-allow
+  namespace: redis-production
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+      tier: database
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from harmonyflow namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow-production
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 16379
+    # Allow from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9121
+    # Allow from backup namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: velero
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Allow inter-pod communication within Redis cluster
+    - from:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 16379
+  egress:
+    # Allow DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    # Allow inter-pod communication within Redis cluster
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 16379

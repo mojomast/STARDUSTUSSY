@@ -1,0 +1,130 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "HarmonyFlow Production - Infrastructure Overview",
+    "tags": ["production", "infrastructure", "kubernetes"],
+    "timezone": "utc",
+    "schemaVersion": 36,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Cluster CPU Usage",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (irate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {"unit": "percent"}
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Cluster Memory Usage",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {"unit": "percent"}
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Node Status",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "kube_node_status_condition{condition=\"Ready\"}",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "fieldConfig": {
+          "overrides": [
+            {
+              "matcher": {"id": "byName", "options": "Value"},
+              "properties": [
+                {
+                  "id": "mappings",
+                  "value": [
+                    {"options": {"0": {"text": "Not Ready", "color": "red"}}, "type": "value"},
+                    {"options": {"1": {"text": "Ready", "color": "green"}}, "type": "value"}
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Pod Status by Namespace",
+        "type": "bargauge",
+        "targets": [
+          {
+            "expr": "sum by (namespace) (kube_pod_status_phase{phase=\"Running\"})",
+            "legendFormat": "{{ namespace }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Disk Usage",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "(1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100",
+            "legendFormat": "{{ instance }} - {{ mountpoint }}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {"unit": "percent"}
+        },
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8}
+      },
+      {
+        "id": 6,
+        "title": "Network Traffic",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(node_network_receive_bytes_total[5m])",
+            "legendFormat": "{{ instance }} RX"
+          },
+          {
+            "expr": "rate(node_network_transmit_bytes_total[5m])",
+            "legendFormat": "{{ instance }} TX"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {"unit": "Bps"}
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "Container Restarts",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "increase(kube_pod_container_status_restarts_total[1h]) > 0",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      }
+    ]
+  }
+}

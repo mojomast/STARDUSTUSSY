@@ -1,0 +1,482 @@
+# Vault Production Deployment for HarmonyFlow SyncBridge
+# Environment: Production
+# HA: 3-replica Raft cluster with TLS
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  labels:
+    name: vault
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault.hcl: |
+    ui = true
+    
+    listener "tcp" {
+      address = "[::]:8200"
+      cluster_address = "[::]:8201"
+      tls_cert_file = "/vault/tls/tls.crt"
+      tls_key_file = "/vault/tls/tls.key"
+      tls_client_ca_file = "/vault/tls/ca.crt"
+      tls_prefer_server_cipher_suites = "true"
+      tls_cipher_suites = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"
+    }
+    
+    storage "raft" {
+      path = "/vault/data"
+      retry_join {
+        leader_api_addr = "https://vault-0.vault-internal:8200"
+      }
+      performance_multiplier = 2
+    }
+    
+    service_registration "kubernetes" {}
+    
+    disable_mlock = true
+    
+    cluster_name = "harmonyflow-production"
+    
+    telemetry {
+      prometheus_retention_time = "30s"
+      disable_hostname = true
+      enable_service_metric = true
+    }
+    
+    api_addr = "https://vault.harmonyflow.io"
+    cluster_addr = "https://vault-internal:8201"
+    
+    audit "file" {
+      path = "/vault/audit/audit.log"
+      mode = "0755"
+      format = "json"
+      prefix = "vault-audit-"
+    }
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vault-auth-delegator
+rules:
+- apiGroups: [""]
+  resources: ["serviceaccounts/token"]
+  verbs: ["create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vault-auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: vault
+  namespace: vault
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/instance: vault
+    app.kubernetes.io/managed-by: kubernetes
+spec:
+  serviceName: vault-internal
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+      app.kubernetes.io/instance: vault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vault
+        app.kubernetes.io/instance: vault
+        app: vault
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: vault
+            topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - m5.large
+                - m5.xlarge
+      serviceAccountName: vault
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 100
+      initContainers:
+      - name: init-vault
+        image: busybox:1.36
+        command: ['sh', '-c']
+        args:
+        - |
+          mkdir -p /vault/data /vault/audit
+          chmod 750 /vault/data /vault/audit
+        volumeMounts:
+        - name: vault-data
+          mountPath: /vault/data
+        - name: vault-audit
+          mountPath: /vault/audit
+      containers:
+      - name: vault
+        image: hashicorp/vault:1.15.4
+        imagePullPolicy: IfNotPresent
+        args:
+        - server
+        - -config=/etc/vault/vault.hcl
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: VAULT_ADDR
+          value: "https://127.0.0.1:8200"
+        - name: VAULT_API_ADDR
+          value: "https://$(HOSTNAME).vault:8200"
+        - name: VAULT_CLUSTER_ADDR
+          value: "https://$(HOSTNAME).vault-internal:8201"
+        - name: VAULT_RAFT_NODE_ID
+          value: "$(HOSTNAME)"
+        - name: SKIP_CHOWN
+          value: "true"
+        ports:
+        - containerPort: 8200
+          name: http
+        - containerPort: 8201
+          name: internal
+        - containerPort: 8202
+          name: cluster-req
+        readinessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true
+            port: 8200
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /v1/sys/health?standbyok=true
+            port: 8200
+            scheme: HTTPS
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - IPC_LOCK
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: vault-config
+          mountPath: /etc/vault
+          readOnly: true
+        - name: vault-data
+          mountPath: /vault/data
+        - name: vault-tls
+          mountPath: /vault/tls
+          readOnly: true
+        - name: vault-audit
+          mountPath: /vault/audit
+        - name: tmp
+          mountPath: /tmp
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+      volumes:
+      - name: vault-config
+        configMap:
+          name: vault-config
+      - name: vault-tls
+        secret:
+          secretName: vault-tls
+          optional: true
+      - name: vault-audit
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: vault-data
+      labels:
+        app: vault
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: gp3
+      resources:
+        requests:
+          storage: 50Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-internal
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - port: 8200
+    targetPort: 8200
+    name: http
+  - port: 8201
+    targetPort: 8201
+    name: internal
+  - port: 8202
+    targetPort: 8202
+    name: cluster-req
+  selector:
+    app.kubernetes.io/name: vault
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8200
+    targetPort: 8200
+    name: http
+  - port: 8201
+    targetPort: 8201
+    name: internal
+  selector:
+    app.kubernetes.io/name: vault
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vault-ingress
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "128k"
+spec:
+  tls:
+  - hosts:
+    - vault.harmonyflow.io
+    secretName: vault-ingress-tls
+  rules:
+  - host: vault.harmonyflow.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vault
+            port:
+              number: 8200
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vault-network-policy
+  namespace: vault
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: harmonyflow-production
+    - namespaceSelector:
+        matchLabels:
+          name: harmonyflow-staging
+    - namespaceSelector:
+        matchLabels:
+          name: external-secrets
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: vault
+    ports:
+    - protocol: TCP
+      port: 8200
+    - protocol: TCP
+      port: 8201
+    - protocol: TCP
+      port: 8202
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: redis-production
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: rabbitmq-production
+    ports:
+    - protocol: TCP
+      port: 5672
+    - protocol: TCP
+      port: 15672
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vault-pdb
+  namespace: vault
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vault
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  endpoints:
+  - port: http
+    interval: 30s
+    path: /v1/sys/metrics
+    scheme: HTTPS
+    tlsConfig:
+      insecureSkipVerify: true
+
+---
+# Vault TLS Certificate Request for cert-manager
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: vault
+spec:
+  secretName: vault-tls
+  commonName: vault.harmonyflow.io
+  dnsNames:
+  - vault.harmonyflow.io
+  - vault
+  - vault.vault
+  - vault.vault.svc
+  - vault.vault.svc.cluster.local
+  - "*.vault-internal.vault.svc.cluster.local"
+  ipAddresses:
+  - 127.0.0.1
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 4096
+  usages:
+  - server auth
+  - client auth
+  - key encipherment
+  - digital signature
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+    group: cert-manager.io

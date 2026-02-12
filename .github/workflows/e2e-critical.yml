@@ -1,0 +1,188 @@
+name: E2E Critical Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'apps/web/**'
+      - 'tests/e2e/**'
+      - 'packages/**'
+      - '.github/workflows/e2e-critical.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'apps/web/**'
+      - 'tests/e2e/**'
+      - 'packages/**'
+
+env:
+  NODE_VERSION: '20'
+  E2E_BASE_URL: 'http://localhost:3000'
+  API_BASE_URL: 'http://localhost:8080'
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: harmonyflow_test
+  POSTGRES_USER: harmonyflow
+  POSTGRES_PASSWORD: password
+  REDIS_HOST: localhost
+  REDIS_PORT: 6379
+
+jobs:
+  e2e-critical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: harmonyflow_test
+          POSTGRES_USER: harmonyflow
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies - Web App
+        working-directory: ./apps/web
+        run: npm ci
+
+      - name: Install dependencies - Tests
+        working-directory: ./tests
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ./tests
+        run: npx playwright install chromium
+
+      - name: Build web app
+        working-directory: ./apps/web
+        run: npm run build
+
+      - name: Start web server
+        working-directory: ./apps/web
+        run: |
+          npm run preview &
+          echo "Web server starting on port 3000..."
+          sleep 3
+          curl -f http://localhost:3000 || (echo "Server not ready" && sleep 5 && curl -f http://localhost:3000)
+
+      - name: Run Critical E2E Tests
+        working-directory: ./tests
+        run: |
+          npx playwright test e2e/auth/ e2e/journeys/ \
+            --project=chromium \
+            --grep-invert="cross-browser|mobile|performance" \
+            --reporter=html,json,list \
+            --output=reports/
+        env:
+          CI: true
+          E2E_BASE_URL: http://localhost:3000
+
+      - name: Generate Test Summary
+        if: always()
+        working-directory: ./tests
+        run: |
+          echo "## E2E Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f "reports/playwright-results.json" ]; then
+            TOTAL=$(jq '.stats.total' reports/playwright-results.json)
+            PASSED=$(jq '.stats.expected' reports/playwright-results.json)
+            FAILED=$(jq '.stats.unexpected' reports/playwright-results.json)
+            DURATION=$(jq '.stats.duration' reports/playwright-results.json)
+            DURATION_SEC=$((DURATION / 1000))
+            
+            PASS_RATE=$((PASSED * 100 / TOTAL))
+            
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Tests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+            echo "| Pass Rate | ${PASS_RATE}% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Duration | ${DURATION_SEC}s |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ $FAILED -eq 0 ]; then
+              echo "✅ **All tests passed!**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ **$FAILED test(s) failed**" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ Test results not found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-critical-results
+          path: |
+            tests/reports/
+            tests/test-results/
+          retention-days: 7
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = './tests/reports/playwright-results.json';
+            
+            if (fs.existsSync(path)) {
+              const results = JSON.parse(fs.readFileSync(path, 'utf8'));
+              const { stats } = results;
+              const passRate = Math.round((stats.expected / stats.total) * 100);
+              const durationSec = Math.round(stats.duration / 1000);
+              const status = stats.unexpected === 0 ? '✅' : '❌';
+              
+              const body = `${status} **E2E Critical Tests**
+              
+              | Metric | Value |
+              |--------|-------|
+              | Total | ${stats.total} |
+              | Passed | ${stats.expected} |
+              | Failed | ${stats.unexpected} |
+              | Pass Rate | ${passRate}% |
+              | Duration | ${durationSec}s |
+              
+              <details>
+              <summary>Test Files</summary>
+              
+              ${results.suites.map(s => `- ${s.title}: ${s.specs.length} tests`).join('\n')}
+              
+              </details>`;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: body
+              });
+            }

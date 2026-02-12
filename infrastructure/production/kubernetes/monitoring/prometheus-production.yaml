@@ -1,0 +1,447 @@
+# Production Monitoring & Alerting Stack
+# Prometheus, Alertmanager with PagerDuty integration
+# SLO/SLA definitions for 99.9% uptime target
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/name: monitoring
+    environment: production
+
+---
+# Prometheus Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-production-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: harmonyflow-production
+        environment: production
+    
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+                - alertmanager:9093
+    
+    scrape_configs:
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+      
+      # Kubernetes API Server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+          - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: default;kubernetes;https
+      
+      # Kubernetes Nodes
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics
+      
+      # Kubernetes Pods
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: kubernetes_pod_name
+      
+      # Kubernetes Services
+      - job_name: 'kubernetes-services'
+        kubernetes_sd_configs:
+          - role: service
+        metrics_path: /probe
+        params:
+          module: [http_2xx]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_probe]
+            action: keep
+            regex: true
+          - source_labels: [__address__]
+            target_label: __param_target
+          - target_label: __address__
+            replacement: blackbox-exporter:9115
+          - source_labels: [__param_target]
+            target_label: instance
+          - action: labelmap
+            regex: __meta_kubernetes_service_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: kubernetes_name
+
+---
+# Prometheus Alert Rules - SLO/SLA Definitions
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-production-rules
+  namespace: monitoring
+data:
+  alert-rules.yml: |
+    groups:
+      # SLO: 99.9% Uptime (43.8 minutes downtime per month)
+      - name: slo_alerts
+        interval: 30s
+        rules:
+          # Availability SLO
+          - alert: SLOViolation_HighErrorRate
+            expr: |
+              (
+                sum(rate(http_requests_total{status=~"5.."}[5m])) 
+                / 
+                sum(rate(http_requests_total[5m]))
+              ) > 0.001
+            for: 5m
+            labels:
+              severity: critical
+              slo: availability
+            annotations:
+              summary: "High error rate detected - SLO violation imminent"
+              description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+              runbook_url: "https://wiki.internal/runbooks/high-error-rate"
+          
+          - alert: SLOViolation_LowAvailability
+            expr: |
+              (
+                1 - (
+                  sum(increase(http_requests_total{status=~"5.."}[1h])) 
+                  / 
+                  sum(increase(http_requests_total[1h]))
+                )
+              ) < 0.999
+            for: 10m
+            labels:
+              severity: critical
+              slo: availability
+            annotations:
+              summary: "Availability below 99.9% SLO"
+              description: "Current availability: {{ $value | humanizePercentage }}"
+          
+          # Latency SLO: 95th percentile < 200ms, 99th percentile < 500ms
+          - alert: SLOViolation_HighLatency_P95
+            expr: |
+              histogram_quantile(0.95, 
+                sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+              ) > 0.2
+            for: 5m
+            labels:
+              severity: warning
+              slo: latency
+            annotations:
+              summary: "P95 latency above 200ms SLO"
+              description: "Current P95 latency: {{ $value | humanizeDuration }}"
+          
+          - alert: SLOViolation_HighLatency_P99
+            expr: |
+              histogram_quantile(0.99, 
+                sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+              ) > 0.5
+            for: 5m
+            labels:
+              severity: critical
+              slo: latency
+            annotations:
+              summary: "P99 latency above 500ms SLO"
+              description: "Current P99 latency: {{ $value | humanizeDuration }}"
+
+      # Critical Infrastructure Alerts
+      - name: infrastructure_critical
+        rules:
+          - alert: KubernetesNodeNotReady
+            expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Kubernetes node {{ $labels.node }} is not ready"
+              description: "Node {{ $labels.node }} has been unready for more than 5 minutes"
+          
+          - alert: KubernetesPodCrashLooping
+            expr: |
+              rate(kube_pod_container_status_restarts_total[15m]) > 0
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+              description: "Pod has restarted {{ $value }} times in the last 15 minutes"
+          
+          - alert: KubernetesPodNotReady
+            expr: |
+              kube_pod_status_phase{phase=~"Pending|Unknown|Failed"} == 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is not ready"
+              description: "Pod has been in {{ $labels.phase }} state for more than 10 minutes"
+          
+          - alert: KubernetesMemoryPressure
+            expr: |
+              (
+                container_memory_usage_bytes{container!=""} 
+                / 
+                container_spec_memory_limit_bytes{container!=""}
+              ) > 0.9
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High memory usage on {{ $labels.pod }}"
+              description: "Memory usage is {{ $value | humanizePercentage }}"
+          
+          - alert: KubernetesCPUThrottling
+            expr: |
+              rate(container_cpu_cfs_throttled_seconds_total[5m]) > 0.1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "CPU throttling on {{ $labels.pod }}"
+              description: "Container is being throttled"
+          
+          - alert: KubernetesDiskPressure
+            expr: |
+              kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes < 0.1
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Disk pressure on {{ $labels.persistentvolumeclaim }}"
+              description: "Disk is {{ $value | humanizePercentage }} full"
+
+      # Database Alerts
+      - name: database_alerts
+        rules:
+          - alert: RedisClusterDown
+            expr: redis_connected_slaves < 2
+            for: 2m
+            labels:
+              severity: critical
+              service: redis
+            annotations:
+              summary: "Redis cluster has insufficient replicas"
+              description: "Redis node {{ $labels.instance }} has only {{ $value }} connected slaves"
+          
+          - alert: RedisHighMemoryUsage
+            expr: |
+              (
+                redis_memory_used_bytes / redis_memory_max_bytes
+              ) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: redis
+            annotations:
+              summary: "Redis high memory usage"
+              description: "Redis memory usage is {{ $value | humanizePercentage }}"
+          
+          - alert: PostgreSQLPrimaryDown
+            expr: pg_up == 0
+            for: 1m
+            labels:
+              severity: critical
+              service: postgresql
+            annotations:
+              summary: "PostgreSQL primary is down"
+              description: "PostgreSQL instance {{ $labels.instance }} is not responding"
+          
+          - alert: PostgreSQLReplicationLag
+            expr: |
+              pg_replication_lag > 300
+            for: 5m
+            labels:
+              severity: warning
+              service: postgresql
+            annotations:
+              summary: "PostgreSQL replication lag high"
+              description: "Replication lag is {{ $value }} seconds"
+          
+          - alert: PostgreSQLConnectionsHigh
+            expr: |
+              (
+                pg_stat_activity_count 
+                / 
+                pg_settings_max_connections
+              ) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: postgresql
+            annotations:
+              summary: "PostgreSQL connection count high"
+              description: "{{ $value | humanizePercentage }} of connections are in use"
+          
+          - alert: PostgreSQLSlowQueries
+            expr: |
+              rate(pg_stat_statements_calls[5m]) > 0.1
+            for: 10m
+            labels:
+              severity: warning
+              service: postgresql
+            annotations:
+              summary: "PostgreSQL slow query rate high"
+              description: "Slow query rate is elevated"
+
+      # RabbitMQ Alerts
+      - name: rabbitmq_alerts
+        rules:
+          - alert: RabbitMQNodeDown
+            expr: rabbitmq_up == 0
+            for: 2m
+            labels:
+              severity: critical
+              service: rabbitmq
+            annotations:
+              summary: "RabbitMQ node is down"
+              description: "RabbitMQ node {{ $labels.node }} is not responding"
+          
+          - alert: RabbitMQHighMemoryUsage
+            expr: |
+              rabbitmq_process_resident_memory_bytes / rabbitmq_resident_memory_limit_bytes > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: rabbitmq
+            annotations:
+              summary: "RabbitMQ high memory usage"
+              description: "RabbitMQ memory usage is {{ $value | humanizePercentage }}"
+          
+          - alert: RabbitMQQueueBuildup
+            expr: |
+              rabbitmq_queue_messages > 10000
+            for: 10m
+            labels:
+              severity: warning
+              service: rabbitmq
+            annotations:
+              summary: "RabbitMQ queue buildup detected"
+              description: "Queue {{ $labels.queue }} has {{ $value }} messages"
+          
+          - alert: RabbitMQUnacknowledgedMessages
+            expr: |
+              rabbitmq_queue_messages_unacknowledged > 1000
+            for: 10m
+            labels:
+              severity: warning
+              service: rabbitmq
+            annotations:
+              summary: "RabbitMQ unacknowledged messages high"
+              description: "Queue {{ $labels.queue }} has {{ $value }} unacknowledged messages"
+
+      # Application Alerts
+      - name: application_alerts
+        rules:
+          - alert: SessionStateServiceHighErrorRate
+            expr: |
+              (
+                sum(rate(http_requests_total{service="session-state-service",status=~"5.."}[5m])) 
+                / 
+                sum(rate(http_requests_total{service="session-state-service"}[5m]))
+              ) > 0.05
+            for: 2m
+            labels:
+              severity: critical
+              service: session-state-service
+            annotations:
+              summary: "Session State Service high error rate"
+              description: "Error rate is {{ $value | humanizePercentage }}"
+          
+          - alert: SessionStateServiceLowRequestRate
+            expr: |
+              sum(rate(http_requests_total{service="session-state-service"}[5m])) < 10
+            for: 5m
+            labels:
+              severity: warning
+              service: session-state-service
+            annotations:
+              summary: "Session State Service request rate low"
+              description: "Request rate has dropped to {{ $value }} req/s"
+          
+          - alert: WebSocketConnectionsHigh
+            expr: |
+              harmonyflow_websocket_connections > 8000
+            for: 5m
+            labels:
+              severity: warning
+              service: session-state-service
+            annotations:
+              summary: "WebSocket connections approaching limit"
+              description: "Current connections: {{ $value }}"
+
+      # Backup Alerts
+      - name: backup_alerts
+        rules:
+          - alert: BackupJobFailed
+            expr: |
+              kube_job_status_failed{job_name=~"redis-backup|postgresql-backup"} == 1
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Backup job failed"
+              description: "Backup job {{ $labels.job_name }} has failed"
+          
+          - alert: BackupNotRun
+            expr: |
+              time() - kube_job_status_completion_time{job_name=~"redis-backup|postgresql-backup"} > 7200
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Backup has not run in 2 hours"
+              description: "Last successful backup was more than 2 hours ago"

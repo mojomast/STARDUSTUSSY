@@ -1,0 +1,433 @@
+# RabbitMQ Cluster Configuration for HarmonyFlow
+# Version: RabbitMQ 3.12+
+# Purpose: Job queues, async messaging, event bus
+
+---
+# Namespace for RabbitMQ
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rabbitmq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: message-queue
+
+---
+# ConfigMap for RabbitMQ configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: rabbitmq
+data:
+  rabbitmq.conf: |
+    # Clustering
+    cluster_name = harmonyflow-rabbitmq
+    cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
+    cluster_formation.k8s.host = kubernetes.default
+    cluster_formation.k8s.address_type = hostname
+    cluster_formation.k8s.service_name = rabbitmq
+    cluster_formation.k8s.namespace = rabbitmq
+    cluster_formation.node_cleanup.interval = 30
+    cluster_formation.node_cleanup.only_log_warning = false
+    
+    # High Availability
+    queue_master_locator = min-masters
+    
+    # Memory and Disk
+    vm_memory_high_watermark.relative = 0.6
+    vm_memory_high_watermark_paging_ratio = 0.5
+    disk_free_limit.absolute = 1GB
+    
+    # Limits
+    max_connections = 10000
+    max_channels = 5000
+    max_queues = 5000
+    
+    # Logging
+    log.file.level = info
+    log.console = true
+    log.console.level = info
+    
+    # Management
+    management.sample_retention_policies.global.minute = 5
+    management.sample_retention_policies.global.hour = 60
+    management.sample_retention_policies.global.day = 1200
+    
+    # Plugins
+    management.load_definitions = /etc/rabbitmq/definitions.json
+    
+  enabled_plugins: |
+    [rabbitmq_management, rabbitmq_peer_discovery_k8s, rabbitmq_prometheus, rabbitmq_shovel, rabbitmq_shovel_management].
+    
+  definitions.json: |
+    {
+      "rabbit_version": "3.12.0",
+      "rabbitmq_version": "3.12.0",
+      "product_name": "RabbitMQ",
+      "product_version": "3.12.0",
+      "users": [
+        {
+          "name": "admin",
+          "password_hash": "PLACEHOLDER_HASH",
+          "hashing_algorithm": "rabbit_password_hashing_sha256",
+          "tags": "administrator"
+        },
+        {
+          "name": "harmonyflow",
+          "password_hash": "PLACEHOLDER_HASH",
+          "hashing_algorithm": "rabbit_password_hashing_sha256",
+          "tags": ""
+        }
+      ],
+      "vhosts": [
+        {
+          "name": "/"
+        },
+        {
+          "name": "harmonyflow"
+        }
+      ],
+      "permissions": [
+        {
+          "user": "admin",
+          "vhost": "/",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        },
+        {
+          "user": "harmonyflow",
+          "vhost": "harmonyflow",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        }
+      ],
+      "queues": [
+        {
+          "name": "session-events",
+          "vhost": "harmonyflow",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-max-priority": 10
+          }
+        },
+        {
+          "name": "content-processing",
+          "vhost": "harmonyflow",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {}
+        },
+        {
+          "name": "collaboration-sync",
+          "vhost": "harmonyflow",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-message-ttl": 3600000
+          }
+        }
+      ],
+      "exchanges": [
+        {
+          "name": "events",
+          "vhost": "harmonyflow",
+          "type": "topic",
+          "durable": true,
+          "auto_delete": false,
+          "internal": false,
+          "arguments": {}
+        }
+      ],
+      "bindings": [
+        {
+          "source": "events",
+          "vhost": "harmonyflow",
+          "destination": "session-events",
+          "destination_type": "queue",
+          "routing_key": "session.*",
+          "arguments": {}
+        },
+        {
+          "source": "events",
+          "vhost": "harmonyflow",
+          "destination": "content-processing",
+          "destination_type": "queue",
+          "routing_key": "content.*",
+          "arguments": {}
+        }
+      ]
+    }
+
+---
+# Secret for RabbitMQ credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-secret
+  namespace: rabbitmq
+type: Opaque
+stringData:
+  username: "admin"
+  password: "CHANGE_ME_IN_PRODUCTION"
+  cookie: "RANDOM_COOKIE_STRING_CHANGE_ME"
+
+---
+# Headless Service for RabbitMQ
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+    - port: 4369
+      targetPort: 4369
+      name: epmd
+    - port: 25672
+      targetPort: 25672
+      name: cluster
+  selector:
+    app: rabbitmq
+
+---
+# Service for RabbitMQ Management UI
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-management
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  ports:
+    - port: 15672
+      targetPort: 15672
+      name: management
+  selector:
+    app: rabbitmq
+
+---
+# StatefulSet for RabbitMQ Cluster (3 nodes)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  serviceName: rabbitmq
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15692"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - rabbitmq
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.12-management-alpine
+          ports:
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 15672
+              name: management
+            - containerPort: 4369
+              name: epmd
+            - containerPort: 25672
+              name: cluster
+            - containerPort: 15692
+              name: prometheus
+          env:
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: cookie
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: username
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: password
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MY_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_SERVICE_NAME
+              value: rabbitmq
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: RABBITMQ_NODENAME
+              value: "rabbit@$(MY_POD_NAME).$(K8S_SERVICE_NAME).$(MY_POD_NAMESPACE).svc.cluster.local"
+          volumeMounts:
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - ping
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: rabbitmq-config
+          configMap:
+            name: rabbitmq-config
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 20Gi
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rabbitmq-metrics
+  namespace: rabbitmq
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: rabbitmq
+  endpoints:
+    - port: prometheus
+      interval: 15s
+      path: /metrics
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rabbitmq-pdb
+  namespace: rabbitmq
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: rabbitmq
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rabbitmq-hpa
+  namespace: rabbitmq
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: rabbitmq
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-network-policy
+  namespace: rabbitmq
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 5672
+        - protocol: TCP
+          port: 15672
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 25672
+        - protocol: TCP
+          port: 15692

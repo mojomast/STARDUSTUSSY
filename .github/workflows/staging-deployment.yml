@@ -1,0 +1,286 @@
+name: Build, Test and Deploy
+
+on:
+  push:
+    branches: [ main, develop, 'release/**' ]
+    paths:
+      - 'services/**'
+      - 'packages/**'
+      - '.github/workflows/**'
+      - 'infrastructure/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'services/**'
+      - 'packages/**'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: harmonyflow/session-state-service
+  AWS_REGION: us-west-2
+  EKS_CLUSTER: harmonyflow-staging
+
+jobs:
+  # Build and Test Job
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        working-directory: ./services/session-state-service
+        run: go mod download
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          working-directory: ./services/session-state-service
+          args: --timeout=5m
+
+      - name: Run unit tests
+        working-directory: ./services/session-state-service
+        run: |
+          go test -v -race -coverprofile=coverage.out ./...
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./services/session-state-service/coverage.out
+          flags: unittests
+          name: codecov-umbrella
+
+      - name: Run integration tests
+        working-directory: ./services/session-state-service
+        run: |
+          docker-compose -f docker-compose.test.yml up -d
+          sleep 10
+          go test -v -tags=integration ./...
+          docker-compose -f docker-compose.test.yml down
+
+  # Security Scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './services/session-state-service'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Build Docker Image
+  build-image:
+    runs-on: ubuntu-latest
+    needs: [build-and-test, security-scan]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=staging-
+            type=raw,value=staging-latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/session-state-service
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Sign image with Cosign
+        uses: sigstore/cosign-installer@v3
+      - run: |
+          cosign sign --yes \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+
+  # Deploy to Staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://api.staging.harmonyflow.io
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.13.0'
+
+      - name: Deploy to Staging
+        run: |
+          # Update image tag in deployment
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${{ github.sha }}"
+          
+          # Apply infrastructure
+          kubectl apply -f infrastructure/kubernetes/linkerd/
+          kubectl apply -f infrastructure/kubernetes/redis/
+          kubectl apply -f infrastructure/kubernetes/postgresql/
+          kubectl apply -f infrastructure/kubernetes/rabbitmq/
+          
+          # Apply staging configurations
+          kubectl apply -f infrastructure/staging/apps/
+          kubectl apply -f infrastructure/staging/ingress/
+          
+          # Update deployment with new image
+          kubectl set image deployment/session-state-service \
+            session-state-service=$IMAGE_TAG \
+            -n harmonyflow-staging
+          
+          # Wait for rollout
+          kubectl rollout status deployment/session-state-service \
+            -n harmonyflow-staging \
+            --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n harmonyflow-staging
+          kubectl get svc -n harmonyflow-staging
+          kubectl get ingress -n harmonyflow-staging
+
+      - name: Run smoke tests
+        run: |
+          # Wait for ingress to be ready
+          sleep 30
+          
+          # Run health check
+          curl -f https://api.staging.harmonyflow.io/health/ready || exit 1
+          
+          # Run basic API tests
+          curl -f https://api.staging.harmonyflow.io/health/live || exit 1
+
+      - name: Notify on success
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ Staging deployment successful!\nService: Session State Service\nCommit: ${{ github.sha }}\nURL: https://api.staging.harmonyflow.io"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ Staging deployment failed!\nService: Session State Service\nCommit: ${{ github.sha }}\nWorkflow: ${{ github.workflow }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Rollback on failure
+  rollback:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: failure()
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER }}
+
+      - name: Rollback deployment
+        run: |
+          kubectl rollout undo deployment/session-state-service -n harmonyflow-staging
+          kubectl rollout status deployment/session-state-service -n harmonyflow-staging
+
+      - name: Notify rollback
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "⚠️ Automatic rollback executed\nService: Session State Service\nEnvironment: staging"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

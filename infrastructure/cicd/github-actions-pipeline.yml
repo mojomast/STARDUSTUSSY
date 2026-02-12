@@ -1,0 +1,349 @@
+# GitHub Actions CI/CD Pipeline for HarmonyFlow
+# Build, test, and deploy microservices
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: harmonyflow
+  AWS_REGION: us-west-2
+  EKS_CLUSTER: harmonyflow-dev
+
+jobs:
+  # Lint and Test Job
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        service: [session-state-service, content-delivery-service, collaboration-service, personalization-service]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        if: contains(matrix.service, 'session-state')
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      
+      - name: Setup Rust
+        if: contains(matrix.service, 'content-delivery')
+        uses: dtolnay/rust-action@stable
+      
+      - name: Setup Node.js
+        if: contains(matrix.service, 'collaboration')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Setup Python
+        if: contains(matrix.service, 'personalization')
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Run Linter - Go
+        if: contains(matrix.service, 'session-state')
+        run: |
+          cd services/${{ matrix.service }}
+          go fmt ./...
+          go vet ./...
+          if command -v golint &> /dev/null; then
+            golint ./...
+          fi
+      
+      - name: Run Linter - Rust
+        if: contains(matrix.service, 'content-delivery')
+        run: |
+          cd services/${{ matrix.service }}
+          cargo fmt -- --check
+          cargo clippy -- -D warnings
+      
+      - name: Run Linter - Node.js
+        if: contains(matrix.service, 'collaboration')
+        run: |
+          cd services/${{ matrix.service }}
+          npm ci
+          npm run lint
+      
+      - name: Run Linter - Python
+        if: contains(matrix.service, 'personalization')
+        run: |
+          cd services/${{ matrix.service }}
+          pip install flake8 black
+          flake8 .
+          black --check .
+      
+      - name: Run Unit Tests - Go
+        if: contains(matrix.service, 'session-state')
+        run: |
+          cd services/${{ matrix.service }}
+          go test -v -race -coverprofile=coverage.out ./...
+          go tool cover -html=coverage.out -o coverage.html
+      
+      - name: Run Unit Tests - Rust
+        if: contains(matrix.service, 'content-delivery')
+        run: |
+          cd services/${{ matrix.service }}
+          cargo test --all-features
+      
+      - name: Run Unit Tests - Node.js
+        if: contains(matrix.service, 'collaboration')
+        run: |
+          cd services/${{ matrix.service }}
+          npm test -- --coverage
+      
+      - name: Run Unit Tests - Python
+        if: contains(matrix.service, 'personalization')
+        run: |
+          cd services/${{ matrix.service }}
+          pip install pytest pytest-cov
+          pytest --cov=. --cov-report=html
+      
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-${{ matrix.service }}
+          path: services/${{ matrix.service }}/coverage*
+
+  # Security Scanning Job
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy Scan Results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      - name: Run Snyk Security Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+        continue-on-error: true
+
+  # Build and Push Docker Images
+  build-and-push:
+    name: Build and Push Images
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.event_name != 'pull_request'
+    
+    strategy:
+      matrix:
+        service: [session-state-service, content-delivery-service, collaboration-service, personalization-service]
+    
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=,suffix=,format=short
+      
+      - name: Build and Push Docker Image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          file: ./services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # Deploy to Kubernetes
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    environment: 
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'development' }}
+      url: https://harmonyflow.io
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER }}
+      
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.13.0'
+      
+      - name: Deploy with Helm
+        run: |
+          # Update image tags in values file
+          for service in session-state-service content-delivery-service collaboration-service personalization-service; do
+            helm upgrade --install $service ./helm-charts/$service \
+              --namespace harmonyflow \
+              --set image.tag=${{ github.sha }} \
+              --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/$service \
+              --wait \
+              --timeout 5m
+          done
+      
+      - name: Verify Deployment
+        run: |
+          kubectl rollout status deployment/session-state-service -n harmonyflow
+          kubectl rollout status deployment/content-delivery-service -n harmonyflow
+          kubectl rollout status deployment/collaboration-service -n harmonyflow
+          kubectl rollout status deployment/personalization-service -n harmonyflow
+      
+      - name: Run Smoke Tests
+        run: |
+          kubectl run smoke-test --rm -i --restart=Never \
+            --image=curlimages/curl:latest \
+            -- curl -f http://session-state-service.harmonyflow.svc.cluster.local/health || exit 1
+
+  # Notify on Completion
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+    
+    steps:
+      - name: Notify Slack on Success
+        if: needs.deploy.result == 'success'
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ Deployment successful!",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚀 HarmonyFlow Deployment Complete"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n${{ github.sha }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Notify Slack on Failure
+        if: needs.deploy.result == 'failure'
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "❌ Deployment failed!",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚨 HarmonyFlow Deployment Failed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ github.ref == 'refs/heads/main' && 'Production' || 'Development' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n${{ github.sha }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

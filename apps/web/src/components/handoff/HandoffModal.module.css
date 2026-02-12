@@ -1,0 +1,349 @@
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal {
+  background: white;
+  border-radius: 1rem;
+  width: 100%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  animation: modalEnter 0.3s ease;
+}
+
+@keyframes modalEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.modalHeader {
+  padding: 1.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modalTitle {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0;
+}
+
+.closeButton {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  border: none;
+  background: #f3f4f6;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  transition: all 0.2s ease;
+}
+
+.closeButton:hover {
+  background: #e5e7eb;
+}
+
+.modalContent {
+  padding: 1.5rem;
+  overflow-y: auto;
+  max-height: calc(90vh - 200px);
+}
+
+.modalFooter {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.stepIndicator {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.step {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.875rem;
+  font-weight: 600;
+  background: #f3f4f6;
+  color: #6b7280;
+  transition: all 0.2s ease;
+}
+
+.step.active {
+  background: #3b82f6;
+  color: white;
+}
+
+.step.completed {
+  background: #10b981;
+  color: white;
+}
+
+.deviceSelection {
+  margin-bottom: 1.5rem;
+}
+
+.selectionTitle {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #374151;
+  margin: 0 0 1rem 0;
+}
+
+.transferMethod {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.methodCard {
+  padding: 1.5rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 0.75rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: white;
+}
+
+.methodCard:hover {
+  border-color: #3b82f6;
+}
+
+.methodCard.selected {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.methodIcon {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.methodTitle {
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0 0 0.25rem 0;
+}
+
+.methodDescription {
+  font-size: 0.875rem;
+  color: #6b7280;
+  margin: 0;
+}
+
+.progressContainer {
+  margin: 2rem 0;
+}
+
+.progressBar {
+  height: 0.5rem;
+  background: #e5e7eb;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+}
+
+.progressInfo {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.progressLabel {
+  color: #6b7280;
+}
+
+.progressValue {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.statusMessage {
+  text-align: center;
+  padding: 2rem;
+}
+
+.statusIcon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+}
+
+.statusTitle {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0 0 0.5rem 0;
+}
+
+.statusText {
+  color: #6b7280;
+  margin: 0;
+}
+
+.confirmationContent {
+  text-align: center;
+}
+
+.confirmationIcon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+}
+
+.confirmationTitle {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0 0 0.5rem 0;
+}
+
+.confirmationText {
+  color: #6b7280;
+  margin: 0 0 1.5rem 0;
+}
+
+.devicePreview {
+  background: #f9fafb;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.previewLabel {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: #6b7280;
+  font-weight: 600;
+  margin: 0 0 0.5rem 0;
+}
+
+.previewDevice {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.previewIcon {
+  font-size: 1.5rem;
+}
+
+.previewInfo {
+  text-align: left;
+}
+
+.previewName {
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0;
+}
+
+.previewPlatform {
+  font-size: 0.875rem;
+  color: #6b7280;
+  margin: 0;
+}
+
+.primaryButton, .secondaryButton, .dangerButton {
+  padding: 0.625rem 1.25rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.primaryButton {
+  background: #3b82f6;
+  color: white;
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.secondaryButton {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.secondaryButton:hover {
+  background: #e5e7eb;
+}
+
+.dangerButton {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.dangerButton:hover {
+  background: #fecaca;
+}
+
+.primaryButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.errorMessage {
+  color: #dc2626;
+  font-size: 0.875rem;
+  text-align: center;
+  padding: 0.75rem;
+  background: #fef2f2;
+  border-radius: 0.5rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 640px) {
+  .modal {
+    max-height: 100vh;
+    border-radius: 0;
+  }
+  
+  .transferMethod {
+    grid-template-columns: 1fr;
+  }
+  
+  .modalFooter {
+    flex-direction: column;
+  }
+}

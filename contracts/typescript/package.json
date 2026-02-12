@@ -1,0 +1,52 @@
+{
+  "name": "@harmonyflow/syncbridge-types",
+  "version": "1.0.0",
+  "description": "TypeScript type definitions for HarmonyFlow SyncBridge API",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src/**/*.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "harmonyflow",
+    "syncbridge",
+    "wellness",
+    "api",
+    "typescript",
+    "types"
+  ],
+  "author": "HarmonyFlow Team <dev@harmonyflow.io>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/harmonyflow/syncbridge.git",
+    "directory": "contracts/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/harmonyflow/syncbridge/issues"
+  },
+  "homepage": "https://docs.harmonyflow.io",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

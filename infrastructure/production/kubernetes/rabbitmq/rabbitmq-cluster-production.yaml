@@ -1,0 +1,595 @@
+# RabbitMQ Production Cluster Configuration
+# 3-node cluster with HA queues and federation
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rabbitmq-production
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: message-queue
+    environment: production
+    criticality: high
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-production-secret
+  namespace: rabbitmq-production
+type: Opaque
+stringData:
+  username: "harmonyflow"
+  password: "CHANGE_ME_IN_VAULT_PRODUCTION"
+  erlang-cookie: "CHANGE_ME_ERLANG_COOKIE"
+  definitions.json: |
+    {
+      "users": [
+        {
+          "name": "harmonyflow",
+          "password_hash": "CHANGE_ME_HASH",
+          "hashing_algorithm": "rabbit_password_hashing_sha256",
+          "tags": "administrator"
+        },
+        {
+          "name": "monitoring",
+          "password_hash": "CHANGE_ME_HASH",
+          "hashing_algorithm": "rabbit_password_hashing_sha256",
+          "tags": "monitoring"
+        }
+      ],
+      "vhosts": [
+        {
+          "name": "/"
+        },
+        {
+          "name": "harmonyflow"
+        }
+      ],
+      "permissions": [
+        {
+          "user": "harmonyflow",
+          "vhost": "/",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        },
+        {
+          "user": "harmonyflow",
+          "vhost": "harmonyflow",
+          "configure": ".*",
+          "write": ".*",
+          "read": ".*"
+        },
+        {
+          "user": "monitoring",
+          "vhost": "/",
+          "configure": "",
+          "write": "",
+          "read": "^amq\\.gen.*$"
+        }
+      ],
+      "queues": [
+        {
+          "name": "session-events",
+          "vhost": "harmonyflow",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-ha-policy": "all",
+            "x-max-length": 100000,
+            "x-overflow": "reject-publish"
+          }
+        },
+        {
+          "name": "sync-messages",
+          "vhost": "harmonyflow",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-ha-policy": "all",
+            "x-max-length": 500000,
+            "x-overflow": "reject-publish"
+          }
+        },
+        {
+          "name": "notifications",
+          "vhost": "harmonyflow",
+          "durable": true,
+          "auto_delete": false,
+          "arguments": {
+            "x-ha-policy": "all",
+            "x-message-ttl": 86400000,
+            "x-max-length": 1000000
+          }
+        }
+      ],
+      "exchanges": [
+        {
+          "name": "events",
+          "vhost": "harmonyflow",
+          "type": "topic",
+          "durable": true,
+          "auto_delete": false
+        },
+        {
+          "name": "commands",
+          "vhost": "harmonyflow",
+          "type": "direct",
+          "durable": true,
+          "auto_delete": false
+        }
+      ],
+      "bindings": [
+        {
+          "source": "events",
+          "vhost": "harmonyflow",
+          "destination": "session-events",
+          "destination_type": "queue",
+          "routing_key": "session.*"
+        },
+        {
+          "source": "events",
+          "vhost": "harmonyflow",
+          "destination": "sync-messages",
+          "destination_type": "queue",
+          "routing_key": "sync.*"
+        },
+        {
+          "source": "commands",
+          "vhost": "harmonyflow",
+          "destination": "notifications",
+          "destination_type": "queue",
+          "routing_key": "notify"
+        }
+      ],
+      "policies": [
+        {
+          "vhost": "harmonyflow",
+          "name": "ha-all",
+          "pattern": ".*",
+          "apply-to": "queues",
+          "definition": {
+            "ha-mode": "all",
+            "ha-sync-mode": "automatic"
+          },
+          "priority": 0
+        }
+      ]
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-production-config
+  namespace: rabbitmq-production
+data:
+  rabbitmq.conf: |
+    # Production RabbitMQ Configuration
+    loopback_users.guest = false
+    
+    # Management plugin
+    management.tcp.port = 15672
+    management.ssl.port = 15671
+    management.ssl.cacertfile = /etc/rabbitmq/certs/ca.crt
+    management.ssl.certfile = /etc/rabbitmq/certs/tls.crt
+    management.ssl.keyfile = /etc/rabbitmq/certs/tls.key
+    management.ssl.verify = verify_peer
+    management.ssl.fail_if_no_peer_cert = false
+    
+    # Clustering
+    cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
+    cluster_formation.k8s.host = kubernetes.default
+    cluster_formation.k8s.address_type = hostname
+    cluster_formation.node_cleanup.only_log_warning = true
+    cluster_formation.node_cleanup.interval = 30
+    
+    # Memory and disk thresholds
+    vm_memory_high_watermark.relative = 0.7
+    vm_memory_high_watermark_paging_ratio = 0.5
+    disk_free_limit.absolute = 2GB
+    
+    # Flow control
+    credit_flow_default_credit.ratio = 0.25
+    
+    # Logging
+    log.file.level = info
+    log.console = true
+    log.console.level = info
+    
+    # Performance tuning
+    channel_max = 2047
+    heartbeat = 60
+    
+    # Mnesia tuning
+    mnesia_table_loading_timeout = 60000
+    mnesia_table_loading_retry_timeout = 30000
+    
+    # Queue settings
+    queue_master_locator = min-masters
+    
+    # Federation (for cross-region)
+    federation.upstream_set = all
+    federation.local_username = harmonyflow
+    
+    # Load definitions on startup
+    load_definitions = /etc/rabbitmq/definitions.json
+
+  enabled_plugins: |
+    [rabbitmq_management, rabbitmq_prometheus, rabbitmq_federation, rabbitmq_federation_management, rabbitmq_shovel, rabbitmq_shovel_management].
+
+---
+# Service for AMQP
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-production
+  namespace: rabbitmq-production
+  labels:
+    app: rabbitmq
+    environment: production
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+      protocol: TCP
+    - port: 5671
+      targetPort: 5671
+      name: amqp-ssl
+      protocol: TCP
+    - port: 15672
+      targetPort: 15672
+      name: management
+      protocol: TCP
+    - port: 15692
+      targetPort: 15692
+      name: prometheus
+      protocol: TCP
+  selector:
+    app: rabbitmq
+    environment: production
+
+---
+# Headless Service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-production-headless
+  namespace: rabbitmq-production
+  labels:
+    app: rabbitmq
+    environment: production
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 4369
+      targetPort: 4369
+      name: epmd
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+    - port: 15672
+      targetPort: 15672
+      name: management
+    - port: 25672
+      targetPort: 25672
+      name: clustering
+  selector:
+    app: rabbitmq
+    environment: production
+
+---
+# StatefulSet for RabbitMQ Cluster
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq-production
+  namespace: rabbitmq-production
+  labels:
+    app: rabbitmq
+    environment: production
+spec:
+  serviceName: rabbitmq-production-headless
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: rabbitmq
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15692"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - rabbitmq
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - rabbitmq
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.12-management-alpine
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4369
+              name: epmd
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 5671
+              name: amqp-ssl
+            - containerPort: 15672
+              name: management
+            - containerPort: 15692
+              name: prometheus
+            - containerPort: 25672
+              name: clustering
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MY_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: RABBITMQ_NODENAME
+              value: "rabbit@$(MY_POD_NAME).rabbitmq-production-headless.$(MY_POD_NAMESPACE).svc.cluster.local"
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-production-secret
+                  key: erlang-cookie
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-production-secret
+                  key: username
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-production-secret
+                  key: password
+            - name: K8S_SERVICE_NAME
+              value: "rabbitmq-production-headless"
+            - name: K8S_HOSTNAME_SUFFIX
+              value: ".rabbitmq-production-headless.$(MY_POD_NAMESPACE).svc.cluster.local"
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq
+            - name: rabbitmq-definitions
+              mountPath: /etc/rabbitmq/definitions.json
+              subPath: definitions.json
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 1000m
+              memory: 4Gi
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - ping
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - -q
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - ping
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+      volumes:
+        - name: rabbitmq-config
+          configMap:
+            name: rabbitmq-production-config
+            items:
+              - key: rabbitmq.conf
+                path: rabbitmq.conf
+              - key: enabled_plugins
+                path: enabled_plugins
+        - name: rabbitmq-definitions
+          secret:
+            secretName: rabbitmq-production-secret
+            items:
+              - key: definitions.json
+                path: definitions.json
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 50Gi
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rabbitmq-production-metrics
+  namespace: rabbitmq-production
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+      - rabbitmq-production
+  selector:
+    matchLabels:
+      app: rabbitmq
+      environment: production
+  endpoints:
+    - port: prometheus
+      interval: 15s
+      scrapeTimeout: 10s
+      path: /metrics
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rabbitmq-production-pdb
+  namespace: rabbitmq-production
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: rabbitmq
+      environment: production
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rabbitmq-production-hpa
+  namespace: rabbitmq-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: rabbitmq-production
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# Network Policy - Deny all by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-production-default-deny
+  namespace: rabbitmq-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Network Policy - Allow specific traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-production-allow
+  namespace: rabbitmq-production
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow-production
+      ports:
+        - protocol: TCP
+          port: 5672
+        - protocol: TCP
+          port: 5671
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 15672
+        - protocol: TCP
+          port: 15692
+    - from:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 5672
+        - protocol: TCP
+          port: 25672
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 4369
+        - protocol: TCP
+          port: 5672
+        - protocol: TCP
+          port: 25672

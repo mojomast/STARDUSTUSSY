@@ -1,0 +1,218 @@
+.container {
+  max-width: 1200px;
+  padding: 1.5rem;
+}
+
+.header {
+  margin-bottom: 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.header h1 {
+  font-size: 1.875rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0 0 0.5rem;
+}
+
+.subtitle {
+  color: #64748b;
+  margin: 0;
+}
+
+.headerActions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.actionButton {
+  padding: 0.625rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 1px solid #e5e7eb;
+  background: white;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.actionButton:hover {
+  background: #f9fafb;
+  border-color: #3b82f6;
+  color: #3b82f6;
+}
+
+.deviceList {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.deviceCard {
+  background: white;
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.deviceIcon {
+  font-size: 2.5rem;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+  border-radius: 0.75rem;
+}
+
+.deviceInfo {
+  flex: 1;
+}
+
+.deviceInfo h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.125rem;
+  color: #1e293b;
+}
+
+.deviceInfo p {
+  margin: 0 0 0.25rem;
+  color: #64748b;
+  font-size: 0.875rem;
+}
+
+.lastActive {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.deviceStatus {
+  display: flex;
+  align-items: center;
+}
+
+.statusBadge {
+  background: #dcfce7;
+  color: #166534;
+  padding: 0.375rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.empty {
+  background: white;
+  border-radius: 0.75rem;
+  padding: 4rem 2rem;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.emptyIcon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+}
+
+.empty p {
+  color: #1e293b;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+.emptySub {
+  color: #64748b;
+  font-size: 0.875rem;
+}
+
+.selectedDevice {
+  margin-top: 2rem;
+  padding-top: 2rem;
+  border-top: 1px solid #e5e7eb;
+}
+
+.selectedDevice h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0 0 1rem 0;
+}
+
+.selectedDeviceCard {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  background: #eff6ff;
+  border: 2px solid #3b82f6;
+  border-radius: 0.75rem;
+}
+
+.selectedIcon {
+  font-size: 2rem;
+}
+
+.selectedInfo {
+  flex: 1;
+}
+
+.selectedName {
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0;
+}
+
+.selectedPlatform {
+  font-size: 0.875rem;
+  color: #6b7280;
+  margin: 0.25rem 0 0 0;
+}
+
+.handoffButton {
+  padding: 0.625rem 1.25rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+  background: #3b82f6;
+  color: white;
+}
+
+.handoffButton:hover {
+  background: #2563eb;
+}
+
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal {
+  background: white;
+  border-radius: 1rem;
+  max-width: 500px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}

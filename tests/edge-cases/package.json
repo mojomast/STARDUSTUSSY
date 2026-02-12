@@ -1,0 +1,44 @@
+{
+  "name": "edge-case-tests",
+  "version": "1.0.0",
+  "description": "Week 3 Edge Case Testing Suite for HarmonyFlow SyncBridge",
+  "scripts": {
+    "test:network": "jest tests/edge-cases/network/ --verbose --testTimeout=60000",
+    "test:session": "jest tests/edge-cases/session/ --verbose --testTimeout=60000",
+    "test:data": "jest tests/edge-cases/data/ --verbose --testTimeout=60000",
+    "test:device": "jest tests/edge-cases/device/ --verbose --testTimeout=60000",
+    "test:performance": "jest tests/edge-cases/performance/ --verbose --testTimeout=300000",
+    "test:chaos": "jest tests/edge-cases/chaos/ --verbose --testTimeout=120000",
+    "test:security": "jest tests/edge-cases/security/ --verbose --testTimeout=60000",
+    "test:all": "jest tests/edge-cases/ --verbose --testTimeout=300000",
+    "test:ci": "jest tests/edge-cases/ --ci --coverage --testTimeout=120000 --maxWorkers=2",
+    "test:watch": "jest tests/edge-cases/ --watch",
+    "test:coverage": "jest tests/edge-cases/ --coverage --testTimeout=300000"
+  },
+  "dependencies": {
+    "@types/jest": "^29.5.0",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.0.0"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "moduleFileExtensions": ["ts", "tsx", "js", "jsx"],
+    "testMatch": ["**/*.test.ts"],
+    "collectCoverageFrom": [
+      "../../packages/client-state-manager/src/**/*.ts",
+      "!**/node_modules/**",
+      "!**/dist/**"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 70,
+        "functions": 70,
+        "lines": 70,
+        "statements": 70
+      }
+    },
+    "setupFilesAfterEnv": ["./jest.setup.js"]
+  }
+}

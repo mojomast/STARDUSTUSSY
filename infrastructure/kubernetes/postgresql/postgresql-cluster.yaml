@@ -1,0 +1,486 @@
+# PostgreSQL Cluster Configuration for HarmonyFlow
+# Architecture: Primary-Replica with Streaming Replication
+# Version: PostgreSQL 15+
+# Purpose: Metadata storage, user data, analytics
+
+---
+# Namespace for PostgreSQL
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgresql
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: database
+
+---
+# ConfigMap for PostgreSQL configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-config
+  namespace: postgresql
+data:
+  postgresql.conf: |
+    # Connection Settings
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 200
+    
+    # Memory Settings
+    shared_buffers = 512MB
+    effective_cache_size = 1536MB
+    work_mem = 4MB
+    maintenance_work_mem = 128MB
+    
+    # WAL Settings
+    wal_level = replica
+    max_wal_size = 2GB
+    min_wal_size = 512MB
+    checkpoint_completion_target = 0.9
+    wal_keep_size = 512MB
+    
+    # Replication Settings
+    max_wal_senders = 10
+    max_replication_slots = 10
+    hot_standby = on
+    hot_standby_feedback = on
+    
+    # Performance Settings
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    
+    # Logging
+    logging_collector = on
+    log_directory = 'pg_log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_min_duration_statement = 1000
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    
+    # Timezone
+    timezone = 'UTC'
+    
+  pg_hba.conf: |
+    # Type  Database        User            Address                 Method
+    local   all             all                                     trust
+    host    all             all             127.0.0.1/32            scram-sha-256
+    host    all             all             ::1/128                 scram-sha-256
+    local   replication     all                                     trust
+    host    replication     all             127.0.0.1/32            scram-sha-256
+    host    replication     all             ::1/128                 scram-sha-256
+    host    replication     replicator      10.0.0.0/8              scram-sha-256
+    host    all             all             10.0.0.0/8              scram-sha-256
+
+---
+# Secret for PostgreSQL credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgresql-secret
+  namespace: postgresql
+type: Opaque
+stringData:
+  password: "CHANGE_ME_IN_PRODUCTION"
+  replication-password: "CHANGE_ME_REPLICATION"
+
+---
+# Headless Service for PostgreSQL Primary
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-primary
+  namespace: postgresql
+  labels:
+    app: postgresql
+    role: primary
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgresql
+  selector:
+    app: postgresql
+    role: primary
+
+---
+# Service for PostgreSQL Replica
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql-replica
+  namespace: postgresql
+  labels:
+    app: postgresql
+    role: replica
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgresql
+  selector:
+    app: postgresql
+    role: replica
+
+---
+# StatefulSet for PostgreSQL Primary
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql-primary
+  namespace: postgresql
+  labels:
+    app: postgresql
+    role: primary
+spec:
+  serviceName: postgresql-primary
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgresql
+      role: primary
+  template:
+    metadata:
+      labels:
+        app: postgresql
+        role: primary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - postgresql
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: postgresql
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+              name: postgresql
+          env:
+            - name: POSTGRES_USER
+              value: "harmonyflow"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: password
+            - name: POSTGRES_DB
+              value: "harmonyflow"
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          command:
+            - postgres
+            - -c
+            - config_file=/etc/postgresql/postgresql.conf
+            - -c
+            - hba_file=/etc/postgresql/pg_hba.conf
+          volumeMounts:
+            - name: postgresql-config
+              mountPath: /etc/postgresql
+            - name: postgresql-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+        
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - containerPort: 9187
+              name: metrics
+          env:
+            - name: DATA_SOURCE_NAME
+              value: "postgresql://harmonyflow:$(POSTGRES_PASSWORD)@localhost:5432/harmonyflow?sslmode=disable"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: postgresql-config
+          configMap:
+            name: postgresql-config
+  volumeClaimTemplates:
+    - metadata:
+        name: postgresql-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 50Gi
+
+---
+# StatefulSet for PostgreSQL Replicas
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgresql-replica
+  namespace: postgresql
+  labels:
+    app: postgresql
+    role: replica
+spec:
+  serviceName: postgresql-replica
+  replicas: 2
+  selector:
+    matchLabels:
+      app: postgresql
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: postgresql
+        role: replica
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - postgresql
+              topologyKey: kubernetes.io/hostname
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: role
+                      operator: In
+                      values:
+                        - primary
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: postgres-init
+          image: postgres:15-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+                echo "Initializing replica from primary..."
+                pg_basebackup -h postgresql-primary -D /var/lib/postgresql/data -U replicator -v -P -W -R
+              fi
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: replication-password
+          volumeMounts:
+            - name: postgresql-data
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgresql
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+              name: postgresql
+          env:
+            - name: POSTGRES_USER
+              value: "harmonyflow"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: password
+            - name: POSTGRES_DB
+              value: "harmonyflow"
+            - name: PGDATA
+              value: /var/lib/postgresql/data
+          command:
+            - postgres
+            - -c
+            - config_file=/etc/postgresql/postgresql.conf
+            - -c
+            - hba_file=/etc/postgresql/pg_hba.conf
+            - -c
+            - hot_standby=on
+          volumeMounts:
+            - name: postgresql-config
+              mountPath: /etc/postgresql
+            - name: postgresql-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: 1500m
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - harmonyflow
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+        
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - containerPort: 9187
+              name: metrics
+          env:
+            - name: DATA_SOURCE_NAME
+              value: "postgresql://harmonyflow:$(POSTGRES_PASSWORD)@localhost:5432/harmonyflow?sslmode=disable"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: postgresql-config
+          configMap:
+            name: postgresql-config
+  volumeClaimTemplates:
+    - metadata:
+        name: postgresql-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 50Gi
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgresql-metrics
+  namespace: postgresql
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: postgresql
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+
+---
+# Pod Disruption Budget for Primary
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgresql-primary-pdb
+  namespace: postgresql
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgresql
+      role: primary
+
+---
+# Pod Disruption Budget for Replicas
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgresql-replica-pdb
+  namespace: postgresql
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgresql
+      role: replica
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql-network-policy
+  namespace: postgresql
+spec:
+  podSelector:
+    matchLabels:
+      app: postgresql
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 9187

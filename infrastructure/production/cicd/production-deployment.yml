@@ -1,0 +1,423 @@
+# Production Deployment Pipeline
+# GitHub Actions workflow for blue/green and canary deployments
+# Automated rollback procedures
+
+name: Production Deployment
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      deployment_strategy:
+        description: 'Deployment strategy'
+        required: true
+        default: 'blue-green'
+        type: choice
+        options:
+          - blue-green
+          - canary
+          - rolling
+      canary_percentage:
+        description: 'Canary traffic percentage (for canary strategy)'
+        required: false
+        default: '10'
+        type: choice
+        options:
+          - '5'
+          - '10'
+          - '25'
+          - '50'
+          - '75'
+
+env:
+  AWS_REGION: us-west-2
+  EKS_CLUSTER: harmonyflow-production
+  REGISTRY: ghcr.io
+  IMAGE_NAME: harmonyflow/session-state-service
+
+jobs:
+  # Build and test
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=,suffix=,format=short
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Run security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tags }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Deploy to production using selected strategy
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.harmonyflow.io
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.13.0'
+
+      - name: Deploy using Blue/Green strategy
+        if: github.event.inputs.deployment_strategy == 'blue-green' || github.event.inputs.deployment_strategy == ''
+        run: |
+          echo "Deploying using Blue/Green strategy..."
+          
+          # Determine current color
+          CURRENT_COLOR=$(kubectl get service session-state-service -n harmonyflow-production -o jsonpath='{.spec.selector.version}' 2>/dev/null || echo "blue")
+          NEW_COLOR=$([ "$CURRENT_COLOR" == "blue" ] && echo "green" || echo "blue")
+          OLD_COLOR=$CURRENT_COLOR
+          
+          echo "Current color: $CURRENT_COLOR, Deploying to: $NEW_COLOR"
+          
+          # Deploy to new color
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: session-state-service-$NEW_COLOR
+            namespace: harmonyflow-production
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: session-state-service
+                version: $NEW_COLOR
+            template:
+              metadata:
+                labels:
+                  app: session-state-service
+                  version: $NEW_COLOR
+              spec:
+                containers:
+                - name: session-state-service
+                  image: ${{ needs.build.outputs.image_tag }}
+                  ports:
+                  - containerPort: 8080
+                  env:
+                  - name: ENVIRONMENT
+                    value: "production"
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 512Mi
+                    limits:
+                      cpu: 1000m
+                      memory: 1Gi
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: 8080
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  readinessProbe:
+                    httpGet:
+                      path: /ready
+                      port: 8080
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+          EOF
+          
+          # Wait for rollout
+          kubectl rollout status deployment/session-state-service-$NEW_COLOR -n harmonyflow-production --timeout=300s
+          
+          # Run smoke tests
+          echo "Running smoke tests..."
+          kubectl run smoke-test --rm -i --restart=Never --image=curlimages/curl:latest -- \
+            curl -sf http://session-state-service-$NEW_COLOR:8080/health || exit 1
+          
+          # Switch service to new color
+          kubectl patch service session-state-service -n harmonyflow-production -p \
+            '{"spec":{"selector":{"version":"'$NEW_COLOR'"}}}'
+          
+          # Wait for traffic to shift
+          sleep 30
+          
+          # Verify new deployment is receiving traffic
+          NEW_PODS=$(kubectl get pods -n harmonyflow-production -l version=$NEW_COLOR --no-headers | wc -l)
+          if [ "$NEW_PODS" -lt 3 ]; then
+            echo "Error: Not enough pods in new deployment"
+            exit 1
+          fi
+          
+          echo "Blue/Green deployment successful! New color: $NEW_COLOR"
+          
+          # Keep old deployment for rollback (will be cleaned up in 24h)
+          echo "OLD_COLOR=$OLD_COLOR" >> $GITHUB_ENV
+
+      - name: Deploy using Canary strategy
+        if: github.event.inputs.deployment_strategy == 'canary'
+        run: |
+          echo "Deploying using Canary strategy with ${{ github.event.inputs.canary_percentage }}% traffic..."
+          
+          CANARY_PERCENTAGE=${{ github.event.inputs.canary_percentage }}
+          
+          # Deploy canary version
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: session-state-service-canary
+            namespace: harmonyflow-production
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: session-state-service
+                version: canary
+            template:
+              metadata:
+                labels:
+                  app: session-state-service
+                  version: canary
+              spec:
+                containers:
+                - name: session-state-service
+                  image: ${{ needs.build.outputs.image_tag }}
+                  ports:
+                  - containerPort: 8080
+                  env:
+                  - name: ENVIRONMENT
+                    value: "production"
+                  resources:
+                    requests:
+                      cpu: 250m
+                      memory: 512Mi
+                    limits:
+                      cpu: 1000m
+                      memory: 1Gi
+          EOF
+          
+          # Wait for canary deployment
+          kubectl rollout status deployment/session-state-service-canary -n harmonyflow-production --timeout=300s
+          
+          # Apply canary ingress with traffic splitting
+          cat <<EOF | kubectl apply -f -
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: session-state-service-canary
+            namespace: harmonyflow-production
+            annotations:
+              nginx.ingress.kubernetes.io/canary: "true"
+              nginx.ingress.kubernetes.io/canary-weight: "$CANARY_PERCENTAGE"
+          spec:
+            rules:
+            - host: api.harmonyflow.io
+              http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: session-state-service-canary
+                      port:
+                        number: 8080
+          EOF
+          
+          # Monitor canary for 10 minutes
+          echo "Monitoring canary deployment for 10 minutes..."
+          sleep 600
+          
+          # Check error rate
+          ERROR_RATE=$(kubectl exec -n monitoring deployment/prometheus -- \
+            sh -c "wget -qO- 'http://localhost:9090/api/v1/query?query=sum(rate(http_requests_total{service=\"session-state-service-canary\",status=~\"5..\"}[5m]))/sum(rate(http_requests_total{service=\"session-state-service-canary\"}[5m]))' | jq -r '.data.result[0].value[1] // \"0\"'")
+          
+          if (( $(echo "$ERROR_RATE > 0.05" | bc -l) )); then
+            echo "Canary error rate too high: $ERROR_RATE"
+            echo "Rolling back canary..."
+            kubectl delete deployment session-state-service-canary -n harmonyflow-production --ignore-not-found=true
+            kubectl delete ingress session-state-service-canary -n harmonyflow-production --ignore-not-found=true
+            exit 1
+          fi
+          
+          echo "Canary deployment successful! Promoting to full deployment..."
+          
+          # Update stable deployment
+          kubectl set image deployment/session-state-service \
+            session-state-service=${{ needs.build.outputs.image_tag }} \
+            -n harmonyflow-production
+          
+          # Wait for rollout
+          kubectl rollout status deployment/session-state-service -n harmonyflow-production --timeout=300s
+          
+          # Remove canary
+          kubectl delete deployment session-state-service-canary -n harmonyflow-production --ignore-not-found=true
+          kubectl delete ingress session-state-service-canary -n harmonyflow-production --ignore-not-found=true
+
+      - name: Deploy using Rolling strategy
+        if: github.event.inputs.deployment_strategy == 'rolling'
+        run: |
+          echo "Deploying using Rolling strategy..."
+          
+          kubectl set image deployment/session-state-service \
+            session-state-service=${{ needs.build.outputs.image_tag }} \
+            -n harmonyflow-production
+          
+          kubectl rollout status deployment/session-state-service -n harmonyflow-production --timeout=300s
+          
+          # Verify deployment
+          kubectl get pods -n harmonyflow-production -l app=session-state-service
+
+      - name: Verify deployment
+        run: |
+          # Health check
+          kubectl run health-check --rm -i --restart=Never --image=curlimages/curl:latest -- \
+            curl -sf https://api.harmonyflow.io/health || exit 1
+          
+          # Check all pods are ready
+          kubectl wait --for=condition=ready pod -l app=session-state-service -n harmonyflow-production --timeout=60s
+
+      - name: Notify deployment success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ Production deployment successful!",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment Successful*\n• Strategy: ${{ github.event.inputs.deployment_strategy || 'blue-green' }}\n• Image: ${{ needs.build.outputs.image_tag }}\n• Commit: ${{ github.sha }}\n• Author: ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify deployment failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "❌ Production deployment failed!",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment Failed*\n• Strategy: ${{ github.event.inputs.deployment_strategy || 'blue-green' }}\n• Image: ${{ needs.build.outputs.image_tag }}\n• Commit: ${{ github.sha }}\n• Author: ${{ github.actor }}\n\nPlease check the logs and consider rollback."
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Automated rollback job
+  rollback:
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      - name: Automatic rollback
+        run: |
+          echo "Deployment failed - initiating automatic rollback..."
+          
+          # Get previous deployment revision
+          kubectl rollout undo deployment/session-state-service -n harmonyflow-production
+          
+          # Wait for rollback
+          kubectl rollout status deployment/session-state-service -n harmonyflow-production --timeout=300s
+          
+          # Verify rollback
+          kubectl get pods -n harmonyflow-production -l app=session-state-service
+          
+          echo "Rollback completed successfully"
+
+      - name: Notify rollback
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "⚠️ Automatic rollback executed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Automatic Rollback Executed*\nDeployment failed and system was automatically rolled back to previous version.\n\nPlease investigate the issue before attempting another deployment."
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

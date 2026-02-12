@@ -1,0 +1,324 @@
+# Vault Initialization and Secret Migration Job
+# This job initializes Vault (if not already initialized) and migrates all secrets
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-init-scripts
+  namespace: vault
+data:
+  init-vault.sh: |
+    #!/bin/bash
+    set -e
+    
+    export VAULT_ADDR="https://127.0.0.1:8200"
+    export VAULT_CACERT="/vault/tls/ca.crt"
+    
+    echo "=== Vault Initialization and Secret Migration ==="
+    
+    # Wait for Vault to be ready
+    echo "Waiting for Vault to be ready..."
+    until vault status -tls-skip-verify 2>/dev/null; do
+      echo "Vault not ready, waiting 5 seconds..."
+      sleep 5
+    done
+    echo "Vault is ready!"
+    
+    # Check if Vault is initialized
+    if vault status -tls-skip-verify | grep -q "Initialized.*true"; then
+      echo "Vault is already initialized."
+      INITIALIZED=true
+    else
+      echo "Initializing Vault..."
+      INITIALIZED=false
+      
+      # Initialize Vault
+      vault operator init -key-shares=5 -key-threshold=3 -recovery-shares=5 -recovery-threshold=3 -tls-skip-verify > /vault/init/keys.txt
+      
+      # Store root token securely
+      echo "Root token saved to /vault/init/keys.txt"
+      
+      # Unseal Vault with 3 keys
+      echo "Unsealing Vault..."
+      for i in 1 2 3; do
+        UNSEAL_KEY=$(grep "Unseal Key $i:" /vault/init/keys.txt | awk '{print $4}')
+        vault operator unseal -tls-skip-verify "$UNSEAL_KEY"
+      done
+      
+      # Export root token for further operations
+      export VAULT_TOKEN=$(grep "Initial Root Token:" /vault/init/keys.txt | awk '{print $4}')
+      echo "Vault unsealed successfully!"
+    fi
+    
+    # If already initialized, unseal if needed
+    if [ "$INITIALIZED" = true ]; then
+      # Try to read token from existing location or expect it to be provided
+      if [ -f /vault/init/keys.txt ]; then
+        export VAULT_TOKEN=$(grep "Initial Root Token:" /vault/init/keys.txt | awk '{print $4}')
+      else
+        echo "ERROR: Vault is initialized but no token found. Please provide VAULT_TOKEN environment variable."
+        exit 1
+      fi
+      
+      # Check if sealed and unseal if needed
+      if vault status -tls-skip-verify | grep -q "Sealed.*true"; then
+        echo "Vault is sealed, unsealing..."
+        for i in 1 2 3; do
+          UNSEAL_KEY=$(grep "Unseal Key $i:" /vault/init/keys.txt | awk '{print $4}')
+          vault operator unseal -tls-skip-verify "$UNSEAL_KEY"
+        done
+      fi
+    fi
+    
+    # Enable Kubernetes authentication
+    echo "Enabling Kubernetes authentication..."
+    vault auth enable kubernetes || echo "Kubernetes auth already enabled"
+    
+    # Configure Kubernetes auth
+    echo "Configuring Kubernetes authentication..."
+    vault write auth/kubernetes/config \
+      token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+      kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443" \
+      kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt || echo "Kubernetes auth already configured"
+    
+    # Enable secrets engines
+    echo "Enabling secrets engines..."
+    vault secrets enable -path=secret kv-v2 || echo "KV v2 already enabled"
+    vault secrets enable -path=database database || echo "Database secrets engine already enabled"
+    vault secrets enable -path=transit transit || echo "Transit secrets engine already enabled"
+    
+    # Create Vault policies
+    echo "Creating Vault policies..."
+    
+    cat > /tmp/session-state-policy.hcl << 'EOF'
+    path "secret/data/harmonyflow/session-state-service" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/data/harmonyflow/redis" {
+      capabilities = ["read"]
+    }
+    path "database/creds/redis" {
+      capabilities = ["read"]
+    }
+    path "transit/encrypt/session-state" {
+      capabilities = ["update"]
+    }
+    path "transit/decrypt/session-state" {
+      capabilities = ["update"]
+    }
+    EOF
+    vault policy write session-state-service /tmp/session-state-policy.hcl || echo "Policy already exists"
+    
+    cat > /tmp/admin-policy.hcl << 'EOF'
+    path "secret/data/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    path "database/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    path "sys/*" {
+      capabilities = ["create", "read", "update", "delete", "list"]
+    }
+    EOF
+    vault policy write admin /tmp/admin-policy.hcl || echo "Policy already exists"
+    
+    cat > /tmp/external-secrets-policy.hcl << 'EOF'
+    path "secret/data/harmonyflow/*" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/data/harmonyflow/session-state-service" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/data/harmonyflow/postgresql" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/data/harmonyflow/redis" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/data/harmonyflow/rabbitmq" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/data/harmonyflow/admin" {
+      capabilities = ["read", "list"]
+    }
+    EOF
+    vault policy write external-secrets /tmp/external-secrets-policy.hcl || echo "Policy already exists"
+    
+    # Create Kubernetes auth roles
+    echo "Creating Kubernetes auth roles..."
+    vault write auth/kubernetes/role/session-state-service \
+      bound_service_account_names="session-state-service" \
+      bound_service_account_namespaces="harmonyflow-production,harmonyflow-staging" \
+      policies=session-state-service \
+      ttl=1h \
+      max_ttl=24h || echo "Role already exists"
+    
+    vault write auth/kubernetes/role/external-secrets \
+      bound_service_account_names="external-secrets" \
+      bound_service_account_namespaces="external-secrets" \
+      policies=external-secrets \
+      ttl=1h \
+      max_ttl=24h || echo "Role already exists"
+    
+    # Generate and store secrets
+    echo "Generating and storing secrets in Vault..."
+    
+    # Generate JWT secrets
+    echo "Generating JWT secrets..."
+    JWT_SECRET=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+    JWT_REFRESH_SECRET=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+    JWT_SECRET_PREVIOUS=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+    JWT_SECRET_NEXT=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
+    
+    vault kv put secret/harmonyflow/session-state-service \
+      jwt-secret="$JWT_SECRET" \
+      jwt-refresh-secret="$JWT_REFRESH_SECRET" \
+      jwt-secret-previous="$JWT_SECRET_PREVIOUS" \
+      jwt-secret-next="$JWT_SECRET_NEXT" \
+      api-key="$(openssl rand -hex 32)" \
+      encryption-key="$(openssl rand -base64 32)" || echo "JWT secrets already exist"
+    
+    # Generate Redis credentials
+    echo "Generating Redis credentials..."
+    vault kv put secret/harmonyflow/redis \
+      password="$(openssl rand -base64 32)" \
+      standby-password="$(openssl rand -base64 32)" || echo "Redis secrets already exist"
+    
+    # Generate PostgreSQL credentials
+    echo "Generating PostgreSQL credentials..."
+    vault kv put secret/harmonyflow/postgresql \
+      password="$(openssl rand -base64 32)" \
+      replication-password="$(openssl rand -base64 32)" \
+      admin-password="$(openssl rand -base64 32)" || echo "PostgreSQL secrets already exist"
+    
+    # Generate RabbitMQ credentials
+    echo "Generating RabbitMQ credentials..."
+    vault kv put secret/harmonyflow/rabbitmq \
+      username="harmonyflow" \
+      password="$(openssl rand -base64 32)" \
+      cookie="$(openssl rand -base64 32)" \
+      erlang-cookie="$(openssl rand -base64 32)" || echo "RabbitMQ secrets already exist"
+    
+    # Generate admin credentials
+    echo "Generating admin credentials..."
+    vault kv put secret/harmonyflow/admin \
+      api-token="$(openssl rand -hex 64)" || echo "Admin secrets already exist"
+    
+    # Configure database secrets engine for dynamic credentials
+    echo "Configuring database secrets engine..."
+    vault write database/config/postgresql-production \
+      plugin_name=postgresql-database-plugin \
+      allowed_roles="harmonyflow,readonly" \
+      connection_url="postgresql://{{username}}:{{password}}@postgresql-primary.postgresql:5432/harmonyflow" \
+      username="vault" \
+      password="$(openssl rand -base64 24)" || echo "PostgreSQL config already exists"
+    
+    vault write database/roles/harmonyflow \
+      db_name=postgresql-production \
+      creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; \
+        GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO \"{{name}}\"; \
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO \"{{name}}\";" \
+      default_ttl="1h" \
+      max_ttl="24h" || echo "Role already exists"
+    
+    echo "=== Vault initialization and secret migration completed successfully! ==="
+    echo "IMPORTANT: Save the unseal keys and root token from /vault/init/keys.txt"
+    echo "These credentials should be stored securely (e.g., in a password manager or HSM)"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-kms-secrets
+  namespace: vault
+type: Opaque
+stringData:
+  # AWS KMS credentials for auto-unseal (optional - replace with actual values)
+  aws-access-key-id: ""
+  aws-secret-access-key: ""
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-init
+  namespace: vault
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-init
+  namespace: vault
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-init
+  namespace: vault
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vault-init
+subjects:
+- kind: ServiceAccount
+  name: vault-init
+  namespace: vault
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-init
+  namespace: vault
+  labels:
+    app: vault-init
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: vault-init
+    spec:
+      serviceAccountName: vault-init
+      restartPolicy: OnFailure
+      containers:
+      - name: vault-init
+        image: hashicorp/vault:1.15.4
+        command: ["/bin/bash", "/scripts/init-vault.sh"]
+        env:
+        - name: VAULT_ADDR
+          value: "https://vault.vault:8200"
+        - name: VAULT_CACERT
+          value: "/vault/tls/ca.crt"
+        - name: KUBERNETES_PORT_443_TCP_ADDR
+          value: "kubernetes.default.svc"
+        volumeMounts:
+        - name: vault-init-scripts
+          mountPath: /scripts
+        - name: vault-init
+          mountPath: /vault/init
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: vault-init-scripts
+        configMap:
+          name: vault-init-scripts
+          defaultMode: 0755
+      - name: vault-init
+        emptyDir: {}

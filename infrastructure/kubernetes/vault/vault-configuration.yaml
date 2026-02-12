@@ -1,0 +1,369 @@
+# HashiCorp Vault Configuration for HarmonyFlow
+# Version: 1.15+
+# Purpose: Secrets management, dynamic credentials, encryption
+
+---
+# Namespace for Vault
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  labels:
+    app.kubernetes.io/name: vault
+    app.kubernetes.io/component: secrets-management
+
+---
+# Vault HelmRelease
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: vault
+      version: "0.27.0"
+      sourceRef:
+        kind: HelmRepository
+        name: hashicorp
+        namespace: flux-system
+  values:
+    server:
+      enabled: true
+      
+      # High Availability Mode with Raft Backend
+      ha:
+        enabled: true
+        replicas: 3
+        raft:
+          enabled: true
+          setNodeId: true
+          config: |
+            ui = true
+            
+            listener "tcp" {
+              tls_disable = 0
+              address = "[::]:8200"
+              cluster_address = "[::]:8201"
+              tls_cert_file = "/vault/userconfig/vault-server-tls/tls.crt"
+              tls_key_file = "/vault/userconfig/vault-server-tls/tls.key"
+              tls_client_ca_file = "/vault/userconfig/vault-server-tls/ca.crt"
+            }
+            
+            storage "raft" {
+              path = "/vault/data"
+            }
+            
+            service_registration "kubernetes" {}
+            
+            # Audit Logging
+            audit "file" {
+              path = "/vault/audit/audit.log"
+            }
+            
+            # Telemetry
+            telemetry {
+              prometheus_retention_time = "30s"
+              disable_hostname = true
+            }
+      
+      resources:
+        requests:
+          cpu: 500m
+          memory: 256Mi
+        limits:
+          cpu: 1000m
+          memory: 512Mi
+      
+      dataStorage:
+        enabled: true
+        size: 10Gi
+        storageClass: gp3
+      
+      auditStorage:
+        enabled: true
+        size: 5Gi
+        storageClass: gp3
+      
+      standalone:
+        enabled: false
+      
+      # Ingress Configuration
+      ingress:
+        enabled: true
+        hosts:
+          - host: vault.harmonyflow.io
+        annotations:
+          kubernetes.io/ingress.class: nginx
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          nginx.ingress.kubernetes.io/ssl-redirect: "true"
+        tls:
+          - hosts:
+              - vault.harmonyflow.io
+            secretName: vault-tls
+    
+    # Vault Agent Injector
+    injector:
+      enabled: true
+      replicas: 2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+      
+    # UI
+    ui:
+      enabled: true
+      serviceType: ClusterIP
+
+---
+# Secret for Vault TLS Certificates (managed by cert-manager)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-server-tls
+  namespace: vault
+type: kubernetes.io/tls
+data:
+  tls.crt: ""
+  tls.key: ""
+  ca.crt: ""
+
+---
+# Vault Policy for HarmonyFlow Services
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-policies
+  namespace: vault
+data:
+  session-state-policy.hcl: |
+    # Read secrets for session-state-service
+    path "secret/data/session-state/*" {
+      capabilities = ["read", "list"]
+    }
+    
+    # Read Redis credentials
+    path "database/creds/redis" {
+      capabilities = ["read"]
+    }
+    
+    # Transit encryption
+    path "transit/encrypt/session-state" {
+      capabilities = ["update"]
+    }
+    
+    path "transit/decrypt/session-state" {
+      capabilities = ["update"]
+    }
+    
+  content-delivery-policy.hcl: |
+    # Read secrets for content-delivery-service
+    path "secret/data/content-delivery/*" {
+      capabilities = ["read", "list"]
+    }
+    
+    # Read S3 credentials
+    path "aws/creds/content-delivery" {
+      capabilities = ["read"]
+    }
+    
+  collaboration-policy.hcl: |
+    # Read secrets for collaboration-service
+    path "secret/data/collaboration/*" {
+      capabilities = ["read", "list"]
+    }
+    
+  personalization-policy.hcl: |
+    # Read secrets for personalization-service
+    path "secret/data/personalization/*" {
+      capabilities = ["read", "list"]
+    }
+    
+    # Read PostgreSQL credentials
+    path "database/creds/postgresql" {
+      capabilities = ["read"]
+    }
+    
+  admin-policy.hcl: |
+    # Full admin access
+    path "*" {
+      capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+    }
+
+---
+# Service Account for Vault
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: vault
+
+---
+# Cluster Role Binding for Vault
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-server-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: vault
+    namespace: vault
+
+---
+# Vault Auth Method Configuration Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-setup
+  namespace: vault
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: vault
+      containers:
+        - name: vault-setup
+          image: hashicorp/vault:1.15
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              # Wait for Vault to be ready
+              until vault status; do
+                echo "Waiting for Vault..."
+                sleep 5
+              done
+              
+              # Initialize Vault (only if not already initialized)
+              if ! vault status | grep -q "Initialized.*true"; then
+                echo "Initializing Vault..."
+                vault operator init -key-shares=5 -key-threshold=3 > /vault/init/keys.txt
+                
+                # Unseal Vault
+                for i in 1 2 3; do
+                  vault operator unseal $(grep "Key $i" /vault/init/keys.txt | awk '{print $4}')
+                done
+                
+                # Login with root token
+                export VAULT_TOKEN=$(grep "Initial Root Token" /vault/init/keys.txt | awk '{print $4}')
+                
+                # Enable Kubernetes auth
+                vault auth enable kubernetes
+                
+                vault write auth/kubernetes/config \
+                  token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                  kubernetes_host="https://$KUBERNETES_PORT_443_TCP_ADDR:443" \
+                  kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                
+                # Enable secrets engines
+                vault secrets enable -path=secret kv-v2
+                vault secrets enable -path=database database
+                vault secrets enable -path=transit transit
+                vault secrets enable -path=aws aws
+                
+                # Create policies
+                vault policy write session-state /vault/policies/session-state-policy.hcl
+                vault policy write content-delivery /vault/policies/content-delivery-policy.hcl
+                vault policy write collaboration /vault/policies/collaboration-policy.hcl
+                vault policy write personalization /vault/policies/personalization-policy.hcl
+                vault policy write admin /vault/policies/admin-policy.hcl
+                
+                # Create Kubernetes auth roles
+                vault write auth/kubernetes/role/session-state-service \
+                  bound_service_account_names=session-state-service \
+                  bound_service_account_namespaces=harmonyflow \
+                  policies=session-state \
+                  ttl=1h
+                
+                vault write auth/kubernetes/role/content-delivery-service \
+                  bound_service_account_names=content-delivery-service \
+                  bound_service_account_namespaces=harmonyflow \
+                  policies=content-delivery \
+                  ttl=1h
+                
+                # Configure database secrets engine
+                vault write database/config/postgresql \
+                  plugin_name=postgresql-database-plugin \
+                  allowed_roles="postgresql" \
+                  connection_url="postgresql://{{username}}:{{password}}@postgresql-primary.postgresql:5432/harmonyflow" \
+                  username="vault" \
+                  password="CHANGE_ME"
+                
+                vault write database/roles/postgresql \
+                  db_name=postgresql \
+                  creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}'; \
+                    GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" \
+                  default_ttl="1h" \
+                  max_ttl="24h"
+                
+                echo "Vault setup completed successfully!"
+              else
+                echo "Vault is already initialized."
+              fi
+          env:
+            - name: VAULT_ADDR
+              value: "http://vault-active:8200"
+          volumeMounts:
+            - name: vault-init
+              mountPath: /vault/init
+            - name: vault-policies
+              mountPath: /vault/policies
+      volumes:
+        - name: vault-init
+          emptyDir: {}
+        - name: vault-policies
+          configMap:
+            name: vault-policies
+      restartPolicy: OnFailure
+
+---
+# Network Policy for Vault
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vault-network-policy
+  namespace: vault
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: harmonyflow
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - protocol: TCP
+          port: 8200
+        - protocol: TCP
+          port: 8201
+        - protocol: TCP
+          port: 443
+  egress:
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432

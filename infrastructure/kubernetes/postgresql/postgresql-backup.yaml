@@ -1,0 +1,142 @@
+# PostgreSQL Backup Configuration
+# Automated backups using pg_dump and WAL archiving
+
+---
+# ConfigMap for backup scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-backup-scripts
+  namespace: postgresql
+data:
+  backup.sh: |
+    #!/bin/bash
+    set -e
+    
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    BACKUP_DIR="/backups/${TIMESTAMP}"
+    S3_PATH="s3://harmonyflow-postgres-backups/${TIMESTAMP}"
+    
+    echo "Starting backup at ${TIMESTAMP}"
+    
+    # Create backup directory
+    mkdir -p ${BACKUP_DIR}
+    
+    # Full database backup
+    PGPASSWORD=${POSTGRES_PASSWORD} pg_dump \
+      -h postgresql-primary.postgresql.svc.cluster.local \
+      -U harmonyflow \
+      -d harmonyflow \
+      -F custom \
+      -f ${BACKUP_DIR}/harmonyflow.dump
+    
+    # Compress backup
+    gzip ${BACKUP_DIR}/harmonyflow.dump
+    
+    # Upload to S3
+    aws s3 cp ${BACKUP_DIR}/harmonyflow.dump.gz ${S3_PATH}/harmonyflow.dump.gz \
+      --storage-class STANDARD_IA
+    
+    # Cleanup old backups (keep last 7 days)
+    aws s3 ls s3://harmonyflow-postgres-backups/ | \
+      awk '{print $2}' | \
+      sort -r | \
+      tail -n +8 | \
+      xargs -I {} aws s3 rm s3://harmonyflow-postgres-backups/{} --recursive
+    
+    echo "Backup completed successfully"
+
+---
+# CronJob for daily backups
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgresql-backup
+  namespace: postgresql
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          containers:
+            - name: postgresql-backup
+              image: postgres:15-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  apk add --no-cache aws-cli
+                  chmod +x /scripts/backup.sh
+                  /scripts/backup.sh
+              env:
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgresql-secret
+                      key: password
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: aws-credentials
+                      key: access-key-id
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: aws-credentials
+                      key: secret-access-key
+                - name: AWS_REGION
+                  value: "us-west-2"
+              volumeMounts:
+                - name: backup-scripts
+                  mountPath: /scripts
+          volumes:
+            - name: backup-scripts
+              configMap:
+                name: postgresql-backup-scripts
+                defaultMode: 0755
+          restartPolicy: OnFailure
+
+---
+# CronJob for WAL archiving verification
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgresql-wal-verify
+  namespace: postgresql
+spec:
+  schedule: "0 */4 * * *"  # Every 4 hours
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          containers:
+            - name: wal-verify
+              image: postgres:15-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Verifying WAL archives..."
+                  aws s3 ls s3://harmonyflow-postgres-wal/ | head -10
+                  echo "WAL verification complete"
+              env:
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: aws-credentials
+                      key: access-key-id
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: aws-credentials
+                      key: secret-access-key
+                - name: AWS_REGION
+                  value: "us-west-2"
+          restartPolicy: OnFailure

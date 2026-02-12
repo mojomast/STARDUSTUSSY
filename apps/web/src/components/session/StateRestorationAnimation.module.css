@@ -1,0 +1,223 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(4px);
+}
+
+.container {
+  text-align: center;
+  padding: 2rem;
+}
+
+.animation {
+  width: 200px;
+  height: 200px;
+  margin: 0 auto 2rem;
+  position: relative;
+}
+
+.circle {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 4px solid transparent;
+}
+
+.circle.outer {
+  border-top-color: #3b82f6;
+  animation: spin 2s linear infinite;
+}
+
+.circle.middle {
+  inset: 20px;
+  border-right-color: #8b5cf6;
+  animation: spin 1.5s linear infinite reverse;
+}
+
+.circle.inner {
+  inset: 40px;
+  border-bottom-color: #10b981;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.icon {
+  position: absolute;
+  inset: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3rem;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.1); opacity: 0.8; }
+}
+
+.particles {
+  position: absolute;
+  inset: 0;
+}
+
+.particle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  opacity: 0;
+}
+
+.particle.blue {
+  background: #3b82f6;
+  animation: particleFloat 2s ease-out infinite;
+}
+
+.particle.purple {
+  background: #8b5cf6;
+  animation: particleFloat 2s ease-out infinite 0.5s;
+}
+
+.particle.green {
+  background: #10b981;
+  animation: particleFloat 2s ease-out infinite 1s;
+}
+
+@keyframes particleFloat {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0);
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--end-x), var(--end-y)) scale(1);
+  }
+}
+
+.title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin: 0 0 0.5rem 0;
+}
+
+.subtitle {
+  color: #6b7280;
+  margin: 0 0 2rem 0;
+  font-size: 0.875rem;
+}
+
+.progressContainer {
+  max-width: 300px;
+  margin: 0 auto;
+}
+
+.progressBar {
+  height: 0.5rem;
+  background: #e5e7eb;
+  border-radius: 9999px;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6, #10b981);
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+  background-size: 200% 100%;
+  animation: gradientShift 2s ease infinite;
+}
+
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.progressInfo {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.progressLabel {
+  font-size: 0.875rem;
+  color: #6b7280;
+}
+
+.progressValue {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.steps {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin-top: 2rem;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  opacity: 0.4;
+  transition: opacity 0.3s ease;
+}
+
+.step.active {
+  opacity: 1;
+}
+
+.step.completed {
+  opacity: 0.6;
+}
+
+.stepIcon {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  transition: all 0.3s ease;
+}
+
+.step.active .stepIcon {
+  background: #3b82f6;
+  color: white;
+  animation: stepPulse 1s ease-in-out infinite;
+}
+
+.step.completed .stepIcon {
+  background: #10b981;
+  color: white;
+}
+
+@keyframes stepPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+.stepLabel {
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-weight: 500;
+}

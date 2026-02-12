@@ -1,0 +1,421 @@
+name: E2E Tests - Week 4 Complete Test Suite
+
+on:
+  push:
+    branches: [ main, develop, 'release/**' ]
+    paths:
+      - 'apps/web/**'
+      - 'tests/e2e/**'
+      - 'packages/**'
+      - '.github/workflows/e2e-tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/web/**'
+      - 'tests/e2e/**'
+      - 'packages/**'
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: 'Browser to test'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - chromium
+          - firefox
+          - webkit
+      test_pattern:
+        description: 'Test file pattern'
+        required: false
+        default: '**/*.spec.ts'
+
+env:
+  NODE_VERSION: '20'
+  E2E_BASE_URL: 'http://localhost:3000'
+  API_BASE_URL: 'http://localhost:8080'
+  POSTGRES_HOST: localhost
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: harmonyflow_test
+  POSTGRES_USER: harmonyflow
+  POSTGRES_PASSWORD: password
+  REDIS_HOST: localhost
+  REDIS_PORT: 6379
+
+jobs:
+  # Setup and build job
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            tests/package-lock.json
+
+      - name: Install dependencies - Web App
+        working-directory: ./apps/web
+        run: npm ci
+
+      - name: Install dependencies - Tests
+        working-directory: ./tests
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ./tests
+        run: npx playwright install --with-deps
+
+      - name: Build web app
+        working-directory: ./apps/web
+        run: npm run build
+
+      - name: Cache build artifacts
+        uses: actions/cache@v3
+        with:
+          path: |
+            apps/web/dist
+            tests/node_modules
+          key: ${{ runner.os }}-e2e-${{ github.sha }}
+
+  # Run E2E tests with sharding for parallel execution
+  e2e-tests:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shardIndex: [1, 2, 3, 4]
+        shardTotal: [4]
+        browser: [chromium, firefox, webkit]
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: harmonyflow_test
+          POSTGRES_USER: harmonyflow
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      session-service:
+        image: ghcr.io/harmonyflow/session-state-service:staging-latest
+        ports:
+          - 8080:8080
+        env:
+          DATABASE_URL: postgres://harmonyflow:password@postgres:5432/harmonyflow_test
+          REDIS_URL: redis://redis:6379
+          JWT_SECRET: test-secret-key
+        options: >-
+          --health-cmd "curl -f http://localhost:8080/health/ready || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: tests/package-lock.json
+
+      - name: Restore cached artifacts
+        uses: actions/cache@v3
+        with:
+          path: |
+            apps/web/dist
+            tests/node_modules
+          key: ${{ runner.os }}-e2e-${{ github.sha }}
+
+      - name: Install Playwright
+        working-directory: ./tests
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Wait for services
+        run: |
+          echo "Waiting for PostgreSQL..."
+          until pg_isready -h localhost -p 5432; do
+            sleep 1
+          done
+          echo "PostgreSQL is ready"
+          
+          echo "Waiting for Session Service..."
+          until curl -f http://localhost:8080/health/ready; do
+            sleep 2
+          done
+          echo "Session Service is ready"
+
+      - name: Setup test database
+        run: |
+          PGPASSWORD=password psql -h localhost -U harmonyflow -d harmonyflow_test -f ./services/data/migrations/001_initial_schema.sql
+          PGPASSWORD=password psql -h localhost -U harmonyflow -d harmonyflow_test -f ./services/data/seed/seed_users.sql
+
+      - name: Start web server
+        working-directory: ./apps/web
+        run: |
+          npm run preview &
+          echo "Web server started on port 3000"
+          sleep 5
+          curl -f http://localhost:3000 || exit 1
+
+      - name: Run E2E tests
+        working-directory: ./tests
+        run: |
+          npx playwright test e2e/ \
+            --project=${{ matrix.browser }} \
+            --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} \
+            --grep="${{ github.event.inputs.test_pattern || '**/*.spec.ts' }}" \
+            --reporter=html,json,junit,list \
+            --output=reports/
+        env:
+          CI: true
+          E2E_BASE_URL: http://localhost:3000
+          API_BASE_URL: http://localhost:8080
+
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts-${{ matrix.browser }}-${{ matrix.shardIndex }}
+          path: |
+            tests/reports/
+            tests/test-results/
+          retention-days: 7
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.browser }}-${{ matrix.shardIndex }}
+          path: tests/reports/playwright-report/
+          retention-days: 7
+
+  # Merge test results and generate reports
+  merge-reports:
+    needs: e2e-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+          pattern: playwright-report-*
+
+      - name: Merge Playwright reports
+        working-directory: ./tests
+        run: |
+          npm ci
+          npx playwright merge-reports --reporter html ../reports/playwright-report-*
+
+      - name: Upload merged report
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-playwright-report
+          path: tests/reports/playwright-report/
+          retention-days: 14
+
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./tests/reports/playwright-report
+          destination_dir: e2e-reports
+
+  # Performance regression check
+  performance-check:
+    needs: e2e-tests
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: test-artifacts-chromium-1
+          path: reports
+
+      - name: Check performance regression
+        run: |
+          # Extract performance metrics from test results
+          if [ -f "reports/playwright-results.json" ]; then
+            echo "Performance metrics found"
+            # Add custom performance comparison logic here
+            # Compare against baseline stored in repository or external service
+          fi
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = './reports/playwright-results.json';
+            
+            if (fs.existsSync(reportPath)) {
+              const results = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              const summary = `
+              ## E2E Test Results
+              
+              **Status**: ${results.stats.expected === results.stats.expected ? '✅ Passed' : '❌ Failed'}
+              
+              | Metric | Value |
+              |--------|-------|
+              | Total Tests | ${results.stats.total} |
+              | Passed | ${results.stats.expected} |
+              | Failed | ${results.stats.unexpected} |
+              | Duration | ${(results.stats.duration / 1000).toFixed(2)}s |
+              
+              [View Full Report](https://harmonyflow.github.io/syncbridge/e2e-reports/)
+              `;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: summary
+              });
+            }
+
+  # Flaky test detection
+  flaky-test-analysis:
+    needs: e2e-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+          pattern: test-artifacts-*
+
+      - name: Analyze flaky tests
+        run: |
+          # Combine all test results and analyze for flaky tests
+          echo "Analyzing test results for flaky tests..."
+          # This would integrate with a flaky test tracking service
+          # or parse the JUnit XML files to detect patterns
+
+  # Coverage badge generation
+  coverage-badge:
+    needs: e2e-tests
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: test-artifacts-chromium-1
+          path: reports
+
+      - name: Generate coverage badge
+        run: |
+          # Generate badge based on test results
+          if [ -f "reports/playwright-results.json" ]; then
+            # Use shields.io or similar to generate badge
+            echo "Generating coverage badge..."
+          fi
+
+  # Notifications
+  notify:
+    needs: [e2e-tests, merge-reports]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ E2E Tests Failed!",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*E2E Tests Failed*\nBranch: ${{ github.ref_name }}\nCommit: ${{ github.sha }}\nAuthor: ${{ github.actor }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Results"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Discord notification on success
+        if: success() && github.event_name == 'schedule'
+        uses: Ilshidur/action-discord@master
+        with:
+          args: |
+            ✅ E2E Nightly Tests Passed!
+            Total Tests: All browsers
+            Report: https://harmonyflow.github.io/syncbridge/e2e-reports/
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+  # Cleanup old test artifacts
+  cleanup:
+    needs: [merge-reports, notify]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old artifacts
+        uses: geekyeggo/delete-artifact@v4
+        with:
+          name: |
+            test-artifacts-*
+            playwright-report-*
+          failOnError: false

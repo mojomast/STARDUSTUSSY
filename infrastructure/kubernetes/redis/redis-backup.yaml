@@ -1,0 +1,62 @@
+# Redis Backup Configuration
+# Automated backups to S3
+
+---
+# CronJob for Redis backups
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: redis-backup
+  namespace: redis
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          containers:
+            - name: redis-backup
+              image: redis:7.0-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  apk add --no-cache aws-cli
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  redis-cli -h redis-cluster-0.redis-cluster.redis.svc.cluster.local \
+                    -a $(REDIS_PASSWORD) \
+                    BGSAVE
+                  sleep 10
+                  aws s3 cp /data/dump.rdb \
+                    s3://harmonyflow-redis-backups/${TIMESTAMP}/dump.rdb \
+                    --storage-class STANDARD_IA
+              env:
+                - name: REDIS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: redis-secret
+                      key: password
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: aws-credentials
+                      key: access-key-id
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: aws-credentials
+                      key: secret-access-key
+                - name: AWS_REGION
+                  value: "us-west-2"
+              volumeMounts:
+                - name: backup-scripts
+                  mountPath: /scripts
+          volumes:
+            - name: backup-scripts
+              configMap:
+                name: redis-backup-scripts
+          restartPolicy: OnFailure

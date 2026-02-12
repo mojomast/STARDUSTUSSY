@@ -1,0 +1,300 @@
+# Prometheus Alerting Rules for Staging Environment
+# Version: 1.0.0
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: harmonyflow-staging-alerts
+  namespace: monitoring
+  labels:
+    app: prometheus
+    environment: staging
+spec:
+  groups:
+    - name: session-state-service
+      interval: 30s
+      rules:
+        # High error rate
+        - alert: SessionStateServiceHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="harmonyflow-staging",service="session-state-service",status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{namespace="harmonyflow-staging",service="session-state-service"}[5m]))
+            ) > 0.01
+          for: 2m
+          labels:
+            severity: critical
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "Session State Service high error rate in staging"
+            description: "Error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+            runbook_url: "https://wiki.harmonyflow.io/runbooks/session-state-service"
+
+        # High latency
+        - alert: SessionStateServiceHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{namespace="harmonyflow-staging",service="session-state-service"}[5m])) by (le)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "Session State Service P95 latency high in staging"
+            description: "P95 latency is {{ $value }}s for the last 5 minutes"
+
+        # Pod crash looping
+        - alert: SessionStateServicePodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="harmonyflow-staging",container="session-state-service"}[10m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "Session State Service pod crash looping in staging"
+            description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in the last 10 minutes"
+
+        # Pod not ready
+        - alert: SessionStateServicePodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="harmonyflow-staging",condition="true",pod=~"session-state-service-.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "Session State Service pod not ready in staging"
+            description: "Pod {{ $labels.pod }} has been not ready for more than 2 minutes"
+
+        # High memory usage
+        - alert: SessionStateServiceHighMemoryUsage
+          expr: |
+            (
+              container_memory_usage_bytes{namespace="harmonyflow-staging",container="session-state-service"}
+              /
+              container_spec_memory_limit_bytes{namespace="harmonyflow-staging",container="session-state-service"}
+            ) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "Session State Service memory usage high in staging"
+            description: "Memory usage is {{ $value | humanizePercentage }} for pod {{ $labels.pod }}"
+
+        # High CPU usage
+        - alert: SessionStateServiceHighCPUUsage
+          expr: |
+            (
+              rate(container_cpu_usage_seconds_total{namespace="harmonyflow-staging",container="session-state-service"}[5m])
+              /
+              container_spec_cpu_quota{namespace="harmonyflow-staging",container="session-state-service"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "Session State Service CPU usage high in staging"
+            description: "CPU usage is {{ $value | humanizePercentage }} for pod {{ $labels.pod }}"
+
+        # WebSocket connection issues
+        - alert: SessionStateServiceWebSocketErrors
+          expr: |
+            rate(websocket_connections_failed_total{namespace="harmonyflow-staging"}[5m]) > 0.1
+          for: 2m
+          labels:
+            severity: critical
+            team: backend
+            environment: staging
+            service: session-state-service
+          annotations:
+            summary: "WebSocket connection errors in staging"
+            description: "WebSocket connection failure rate is {{ $value }} per second"
+
+    - name: infrastructure
+      interval: 30s
+      rules:
+        # Redis down
+        - alert: RedisDown
+          expr: |
+            up{job="redis",namespace="redis-staging"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: devops
+            environment: staging
+            service: redis
+          annotations:
+            summary: "Redis is down in staging"
+            description: "Redis instance {{ $labels.instance }} has been down for more than 1 minute"
+
+        # PostgreSQL down
+        - alert: PostgreSQLDown
+          expr: |
+            pg_up{namespace="postgresql-staging"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: devops
+            environment: staging
+            service: postgresql
+          annotations:
+            summary: "PostgreSQL is down in staging"
+            description: "PostgreSQL instance {{ $labels.instance }} has been down for more than 1 minute"
+
+        # RabbitMQ down
+        - alert: RabbitMQDown
+          expr: |
+            rabbitmq_up{namespace="rabbitmq-staging"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: devops
+            environment: staging
+            service: rabbitmq
+          annotations:
+            summary: "RabbitMQ is down in staging"
+            description: "RabbitMQ instance {{ $labels.instance }} has been down for more than 1 minute"
+
+        # Disk space warning
+        - alert: DiskSpaceWarning
+          expr: |
+            (
+              kubelet_volume_stats_available_bytes{namespace=~".*-staging"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace=~".*-staging"}
+            ) < 0.15
+          for: 5m
+          labels:
+            severity: warning
+            team: devops
+            environment: staging
+          annotations:
+            summary: "Low disk space in staging"
+            description: "Volume {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} has less than 15% space remaining"
+
+        # Disk space critical
+        - alert: DiskSpaceCritical
+          expr: |
+            (
+              kubelet_volume_stats_available_bytes{namespace=~".*-staging"}
+              /
+              kubelet_volume_stats_capacity_bytes{namespace=~".*-staging"}
+            ) < 0.05
+          for: 1m
+          labels:
+            severity: critical
+            team: devops
+            environment: staging
+          annotations:
+            summary: "Critical disk space in staging"
+            description: "Volume {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} has less than 5% space remaining"
+
+    - name: kubernetes
+      interval: 30s
+      rules:
+        # Node not ready
+        - alert: KubernetesNodeNotReady
+          expr: |
+            kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            team: devops
+            environment: staging
+          annotations:
+            summary: "Kubernetes node not ready"
+            description: "Node {{ $labels.node }} has been not ready for more than 5 minutes"
+
+        # Pod eviction
+        - alert: KubernetesPodEvicted
+          expr: |
+            kube_pod_status_reason{reason="Evicted"} == 1
+          for: 0m
+          labels:
+            severity: warning
+            team: devops
+            environment: staging
+          annotations:
+            summary: "Pod evicted in staging"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been evicted"
+
+        # Job failed
+        - alert: KubernetesJobFailed
+          expr: |
+            kube_job_status_failed{namespace=~".*-staging"} == 1
+          for: 0m
+          labels:
+            severity: warning
+            team: devops
+            environment: staging
+          annotations:
+            summary: "Kubernetes job failed in staging"
+            description: "Job {{ $labels.job_name }} in namespace {{ $labels.namespace }} has failed"
+
+---
+# AlertManager Configuration
+apiVersion: monitoring.coreos.com/v1
+kind: AlertmanagerConfig
+metadata:
+  name: harmonyflow-staging-alerts
+  namespace: monitoring
+spec:
+  route:
+    receiver: 'slack-notifications'
+    groupBy: ['alertname', 'severity', 'environment']
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+    routes:
+      - match:
+          severity: critical
+        receiver: 'pagerduty-critical'
+        continue: true
+      - match:
+          severity: warning
+        receiver: 'slack-notifications'
+  receivers:
+    - name: 'slack-notifications'
+      slackConfigs:
+        - apiURL:
+            key: slack-webhook-url
+            name: alertmanager-slack-secret
+          channel: '#staging-alerts'
+          title: '[STAGING] {{ .GroupLabels.alertname }}'
+          text: |
+            {{ range .Alerts }}
+            *Alert:* {{ .Annotations.summary }}
+            *Description:* {{ .Annotations.description }}
+            *Severity:* {{ .Labels.severity }}
+            *Service:* {{ .Labels.service }}
+            {{ end }}
+          sendResolved: true
+    - name: 'pagerduty-critical'
+      pagerdutyConfigs:
+        - serviceKey:
+            key: pagerduty-service-key
+            name: alertmanager-pagerduty-secret
+          severity: critical
+          description: '{{ .GroupLabels.alertname }}'
+          details:
+            - key: environment
+              value: staging
+            - key: service
+              value: '{{ .CommonLabels.service }}'

@@ -1,0 +1,67 @@
+.container {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: #f1f5f9;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  position: relative;
+}
+
+.indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+.connected {
+  background-color: #22c55e;
+}
+
+.connecting {
+  background-color: #eab308;
+}
+
+.disconnected {
+  background-color: #94a3b8;
+}
+
+.error {
+  background-color: #ef4444;
+}
+
+.text {
+  color: #475569;
+}
+
+.errorTooltip {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background-color: #1e293b;
+  color: white;
+  font-size: 0.75rem;
+  border-radius: 0.375rem;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+.container:hover .errorTooltip {
+  opacity: 1;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
